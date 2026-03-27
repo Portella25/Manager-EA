@@ -1,0 +1,9 @@
+{
+  "name": "fc-companion-fbchunks-parser",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Internal FBCHUNKS parser bridge",
+  "dependencies": {
+    "fifa-career-save-parser": "^0.1.1"
+  }
+}

@@ -1,0 +1,47 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=Barlow:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-bg-dark: #0a140d;
+    --color-bg-card: #112115;
+    
+    --color-semantic-green: #3cac5c;
+    --color-semantic-red: #e05535;
+    --color-semantic-purple: #7b5ea7;
+    --color-semantic-gold: #c8a84b;
+    --color-semantic-blue: #3b9dd4;
+    
+    --color-text-primary: #ffffff;
+    --color-text-secondary: #a0b0a5;
+  }
+
+  body {
+    @apply bg-bg-dark text-text-primary font-sans antialiased;
+    /* Custom background image support will be injected via style attribute */
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    min-height: 100vh;
+  }
+
+  /* Scrollbar hidden for PWA feel */
+  ::-webkit-scrollbar {
+    width: 0px;
+    background: transparent; /* make scrollbar transparent */
+  }
+}
+
+@layer components {
+  .card-base {
+    @apply bg-bg-card rounded-xl border border-white/5 shadow-lg overflow-hidden;
+  }
+  
+  .font-condensed {
+    font-family: 'Barlow Condensed', sans-serif;
+  }
+}

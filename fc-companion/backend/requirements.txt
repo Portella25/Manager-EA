@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+watchdog
+sqlalchemy
+pydantic
+requests
+python-dotenv
+google-generativeai

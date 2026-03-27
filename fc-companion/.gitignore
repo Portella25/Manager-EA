@@ -1,0 +1,17 @@
+.env
+.env.*
+*.env
+
+*.key
+*.pem
+
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+
+fc-companion/backend/*.db
+backend/*.db
+*.db
+
+node_modules/
+dist/
