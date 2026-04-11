@@ -34,7 +34,7 @@ export const useCareerHubStore = create<CareerHubState>((set) => ({
       const [dashboardHome, dailyNews, conferenceContext] = await Promise.all([
         fetchDashboardHome(effectiveSaveUid),
         fetchNewsFeedDaily(effectiveSaveUid),
-        fetchConferenceContext(effectiveSaveUid).catch(() => null)
+        fetchConferenceContext(effectiveSaveUid, undefined, 6).catch(() => null)
       ])
       set({
         dashboardHome,
@@ -57,7 +57,7 @@ export const useCareerHubStore = create<CareerHubState>((set) => ({
       const dailyNews = await rebuildNewsFeedDaily(effectiveSaveUid, date)
       const [dashboardHome, conferenceContext] = await Promise.all([
         fetchDashboardHome(effectiveSaveUid),
-        fetchConferenceContext(effectiveSaveUid).catch(() => null)
+        fetchConferenceContext(effectiveSaveUid, undefined, 6).catch(() => null)
       ])
       set({
         dailyNews,

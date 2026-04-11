@@ -16,7 +16,10 @@ class SeasonArcEngine:
             theme = "resiliência tática"
         else:
             theme = "equilíbrio competitivo"
-        title = f"Arco da temporada {season_label}"
+        label = str(season_label or "").strip()
+        if not label or label.lower() == "current":
+            label = "atual"
+        title = f"Arco da temporada {label}"
         summary = f"O clube inicia um arco de {theme}, com decisões acumuladas moldando o desfecho da época."
         max_milestones = 5 if rep >= 40 else 4
         return {"title": title, "theme": theme, "summary": summary, "max_milestones": max_milestones}

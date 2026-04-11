@@ -86,29 +86,41 @@ class ReputationEngine:
 
     def reputation_label(self, score: int) -> str:
         if score >= 80:
-            return "elite"
+            return "Elite"
         if score >= 65:
-            return "respeitado"
+            return "Respeitado"
         if score >= 50:
-            return "estável"
+            return "Estável"
         if score >= 35:
-            return "questionado"
-        return "em_risco"
+            return "Questionado"
+        return "Em risco"
 
     def fan_label(self, score: int) -> str:
         if score >= 80:
-            return "euforia"
+            return "Euforia"
         if score >= 65:
-            return "apoio"
+            return "Apoio"
         if score >= 50:
-            return "neutro"
+            return "Neutro"
         if score >= 35:
-            return "desconfiança"
-        return "hostil"
+            return "Desconfiança"
+        return "Hostil"
 
     def analyze_press_answer(self, answer: str) -> Tuple[str, int, int]:
         text = (answer or "").strip().lower()
-        positive = ["confiante", "orgulho", "evolução", "trabalho", "foco", "responsabilidade"]
+        positive = [
+            "confiante",
+            "confio",
+            "acredito",
+            "preparado",
+            "preparados",
+            "orgulho",
+            "evolução",
+            "trabalho",
+            "foco",
+            "responsabilidade",
+            "torcida",
+        ]
         negative = ["culpa", "desastre", "fracasso", "inaceitável", "crise", "ruim"]
         evasive = ["sem comentários", "prefiro não", "não vou falar", "assunto interno"]
         pos_score = sum(1 for token in positive if token in text)

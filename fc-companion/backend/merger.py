@@ -55,10 +55,9 @@ class StateMerger:
                 pid = 0
             if pid <= 0:
                 continue
-            current_name = str(player.get("player_name") or "").strip()
-            unresolved = (not current_name) or current_name.startswith("ID ")
-            if unresolved and pid in name_map:
-                player["player_name"] = name_map[pid]
+            resolved = str(name_map.get(pid) or "").strip()
+            if resolved:
+                player["player_name"] = resolved
                 player["name_source"] = "lua_runtime"
 
     def _extract_lua_live_role_map(self, lua: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -109,6 +108,57 @@ class StateMerger:
             if payload.get("contract_status") is not None and player.get("contract_status") is None:
                 player["contract_status"] = payload.get("contract_status")
 
+    def _extract_live_db_players(self, lua: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+        raw = self._safe_dict(lua.get("live_db_players"))
+        out: Dict[int, Dict[str, Any]] = {}
+        for key, value in raw.items():
+            try:
+                pid = int(key)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or not isinstance(value, dict):
+                continue
+            out[pid] = value
+        return out
+
+    def _apply_live_db_players(self, squad: List[Dict[str, Any]], live_db: Dict[int, Dict[str, Any]]) -> None:
+        if not live_db:
+            return
+        for player in squad:
+            try:
+                pid = int(player.get("playerid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            if pid <= 0:
+                continue
+            snap = live_db.get(pid)
+            if not snap:
+                continue
+            ovr = snap.get("overallrating")
+            if ovr is not None:
+                try:
+                    player["overallrating"] = int(ovr)
+                except (TypeError, ValueError):
+                    player["overallrating"] = ovr
+                player["overallrating_source"] = "lua_le_db"
+            pos = snap.get("preferredposition1")
+            if pos is not None:
+                try:
+                    player["preferredposition1"] = int(pos)
+                except (TypeError, ValueError):
+                    player["preferredposition1"] = pos
+                player["preferredposition_source"] = "lua_le_db"
+            pot = snap.get("potential")
+            if pot is not None and player.get("potential") is None:
+                try:
+                    player["potential"] = int(pot)
+                except (TypeError, ValueError):
+                    player["potential"] = pot
+            for fld in ("age", "form", "fitness", "sharpness"):
+                v = snap.get(fld)
+                if v is not None and player.get(fld) is None:
+                    player[fld] = v
+
     def merge(self) -> Dict[str, Any]:
         try:
             lua = self._read_json(self.state_lua_path)
@@ -121,7 +171,9 @@ class StateMerger:
             squad = self._safe_list(save.get("squad"))
             lua_name_map = self._extract_lua_name_map(lua)
             lua_live_roles = self._extract_lua_live_role_map(lua)
+            lua_live_db = self._extract_live_db_players(lua)
             self._apply_name_resolution(squad, lua_name_map)
+            self._apply_live_db_players(squad, lua_live_db)
             self._apply_live_roles(squad, lua_live_roles)
             squad.sort(
                 key=lambda p: p.get("overall_live") or p.get("overallrating") or 0,
@@ -132,6 +184,7 @@ class StateMerger:
             merged_meta["save_extracted_at"] = save.get("extracted_at")
             merged_meta["name_resolution_count"] = len(lua_name_map)
             merged_meta["live_roles_count"] = len(lua_live_roles)
+            merged_meta["live_db_players_count"] = len(lua_live_db)
             sources = []
             if lua:
                 sources.append("lua_memory")

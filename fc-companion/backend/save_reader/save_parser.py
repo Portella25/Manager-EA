@@ -283,6 +283,67 @@ class SaveParser:
         except (TypeError, ValueError):
             return default
 
+    def _fb_merge_rows_two_dbs(self, table: str, id_field: str) -> Dict[int, Dict[str, Any]]:
+        """Une linhas de db0 e db1; campos não-nulos de qualquer lado preenchem lacunas."""
+        merged: Dict[int, Dict[str, Any]] = {}
+        for rows in (self.fb_db0.get(table) or [], self.fb_db1.get(table) or []):
+            for row in rows:
+                rid = self._to_int(row.get(id_field), -1)
+                if rid < 0:
+                    continue
+                if rid not in merged:
+                    merged[rid] = dict(row)
+                    continue
+                base = merged[rid]
+                for k, v in row.items():
+                    if v is None:
+                        continue
+                    if k not in base or base[k] is None or base[k] == "":
+                        base[k] = v
+        return merged
+
+    def _fb_name_map_two_dbs(self) -> Dict[int, str]:
+        out: Dict[int, str] = {}
+        for rows in (self.fb_db0.get("dcplayernames") or [], self.fb_db1.get("dcplayernames") or []):
+            for n in rows:
+                nid = self._to_int(n.get("nameid"), -1)
+                if nid < 0:
+                    continue
+                name = str(n.get("name") or "").strip()
+                if name:
+                    out[nid] = name
+        return out
+
+    def _squadranking_overall_to_float(self, raw: Any) -> Optional[float]:
+        """curroverall/lastoverall: em vários saves vem ×10 (ex. 840); noutros já 0–100."""
+        if raw is None:
+            return None
+        v = self._to_float(raw, -1.0)
+        if v < 0:
+            return None
+        if v > 100:
+            return v / 10.0
+        return v
+
+    def _fb_contracts_for_team(self, user_team_id: int) -> List[Dict[str, Any]]:
+        """Contratos do clube em db0+db1; uma linha por playerid (campos fundidos)."""
+        by_pid: Dict[int, Dict[str, Any]] = {}
+        for rows in (self.fb_db0.get("career_playercontract") or [], self.fb_db1.get("career_playercontract") or []):
+            for c in rows:
+                if self._to_int(c.get("teamid")) != user_team_id:
+                    continue
+                pid = self._to_int(c.get("playerid"), -1)
+                if pid < 0:
+                    continue
+                if pid not in by_pid:
+                    by_pid[pid] = dict(c)
+                else:
+                    base = by_pid[pid]
+                    for k, v in c.items():
+                        if v is not None and (k not in base or base[k] is None):
+                            base[k] = v
+        return list(by_pid.values())
+
     def _resolve_fb_name(
         self,
         player_row: Dict[str, Any],
@@ -348,37 +409,29 @@ class SaveParser:
 
     def get_squad(self, user_team_id: int) -> List[Dict[str, Any]]:
         if self.mode == "fbchunks":
-            contracts = self._fb_get_table("career_playercontract", preferred_db=0)
-            players = self._fb_get_table("players", preferred_db=1)
-            edited = self._fb_get_table("editedplayernames", preferred_db=1)
-            names = self._fb_get_table("dcplayernames", preferred_db=1)
-            team_links = self._fb_get_table("teamplayerlinks", preferred_db=1)
-            squad_rank = self._fb_get_table("career_squadranking", preferred_db=0)
-            growth_rows = self._fb_get_table("career_playergrowthuserseason", preferred_db=0)
-            players_by_id = {self._to_int(p.get("playerid")): p for p in players if p.get("playerid") is not None}
-            edited_by_pid = {
-                self._to_int(e.get("playerid")): e for e in edited if e.get("playerid") is not None
-            }
-            names_by_id = {
-                self._to_int(n.get("nameid")): str(n.get("name") or "")
-                for n in names
-                if n.get("nameid") is not None
-            }
-            links_by_pid = {
-                self._to_int(t.get("playerid")): t
-                for t in team_links
-                if self._to_int(t.get("teamid")) == user_team_id and t.get("playerid") is not None
-            }
-            rank_by_pid = {
-                self._to_int(r.get("playerid")): r for r in squad_rank if r.get("playerid") is not None
-            }
-            growth_by_pid = {
-                self._to_int(g.get("playerid")): g for g in growth_rows if g.get("playerid") is not None
-            }
+            contracts = self._fb_contracts_for_team(user_team_id)
+            players_by_id = self._fb_merge_rows_two_dbs("players", "playerid")
+            edited_by_pid = self._fb_merge_rows_two_dbs("editedplayernames", "playerid")
+            names_by_id = self._fb_name_map_two_dbs()
+            team_links_all = (self.fb_db0.get("teamplayerlinks") or []) + (
+                self.fb_db1.get("teamplayerlinks") or []
+            )
+            links_by_pid: Dict[int, Dict[str, Any]] = {}
+            for t in team_links_all:
+                if self._to_int(t.get("teamid")) != user_team_id or t.get("playerid") is None:
+                    continue
+                pid = self._to_int(t.get("playerid"))
+                if pid not in links_by_pid:
+                    links_by_pid[pid] = dict(t)
+                else:
+                    base = links_by_pid[pid]
+                    for k, v in t.items():
+                        if v is not None and (k not in base or base[k] is None):
+                            base[k] = v
+            rank_by_pid = self._fb_merge_rows_two_dbs("career_squadranking", "playerid")
+            growth_by_pid = self._fb_merge_rows_two_dbs("career_playergrowthuserseason", "playerid")
             out: List[Dict[str, Any]] = []
             for c in contracts:
-                if self._to_int(c.get("teamid")) != user_team_id:
-                    continue
                 pid = self._to_int(c.get("playerid"))
                 p = players_by_id.get(pid, {})
                 e = edited_by_pid.get(pid)
@@ -388,9 +441,9 @@ class SaveParser:
                 link = links_by_pid.get(pid, {})
                 overall_raw = self._row_get(p, "overallrating", default=None)
                 overall_live_raw = self._row_get(rank, "curroverall", default=None)
-                overall_live = (
-                    self._to_float(overall_live_raw) / 10.0 if overall_live_raw is not None else None
-                )
+                overall_live = self._squadranking_overall_to_float(overall_live_raw)
+                last_over_raw = self._row_get(rank, "lastoverall", default=None)
+                overall_prev = self._squadranking_overall_to_float(last_over_raw)
                 row = {
                     "playerid": pid,
                     "firstname": first,
@@ -398,11 +451,7 @@ class SaveParser:
                     "commonname": common,
                     "overallrating": overall_raw,
                     "overall_live": overall_live,
-                    "overall_prev": (
-                        self._to_float(self._row_get(rank, "lastoverall", default=None)) / 10.0
-                        if self._row_get(rank, "lastoverall", default=None) is not None
-                        else None
-                    ),
+                    "overall_prev": overall_prev,
                     "potential": self._row_get(p, "potential", default=self._row_get(growth, "potential")),
                     "age": self._row_get(p, "age"),
                     "birthdate": self._row_get(p, "birthdate"),
@@ -524,6 +573,21 @@ class SaveParser:
                 return ""
             return f"{year:04d}-{month:02d}"
 
+        def row_counts_as_transfer(
+            amount: float,
+            is_loan_buy: int,
+            complete_date: int,
+            signed_date: int,
+        ) -> bool:
+            """Alinhado ao companion_export.lua: grátis / empréstimo com datas contam."""
+            if amount > 0:
+                return True
+            if is_loan_buy != 0:
+                return True
+            if complete_date > 0 or signed_date > 0:
+                return True
+            return False
+
         if self.mode == "fbchunks":
             if not self._table_exists("career_presignedcontract"):
                 return []
@@ -552,9 +616,12 @@ class SaveParser:
                 offered_fee = self._to_float(row.get("offeredfee"), 0.0)
                 future_fee = self._to_float(row.get("future_fee"), 0.0)
                 amount = offered_fee if offered_fee > 0 else future_fee
+                is_loan_buy = self._to_int(row.get("isloanbuy"), 0)
                 is_buy = offer_team_id == user_team_id and source_team_id > 0 and source_team_id != user_team_id
                 is_sell = source_team_id == user_team_id and offer_team_id > 0 and offer_team_id != user_team_id
-                if amount <= 0 or (not is_buy and not is_sell):
+                if (not is_buy and not is_sell) or not row_counts_as_transfer(
+                    float(amount), is_loan_buy, complete_date, signed_date
+                ):
                     continue
                 key = (player_id, signed_date, source_team_id, offer_team_id, int(amount))
                 if key in seen:
@@ -571,7 +638,7 @@ class SaveParser:
                         "fee": round(amount, 2),
                         "type": "buy" if is_buy else "sell",
                         "direction": "in" if is_buy else "out",
-                        "is_loan_buy": self._to_int(row.get("isloanbuy"), 0),
+                        "is_loan_buy": is_loan_buy,
                         "signed_date": signed_date,
                         "completed_date": complete_date,
                         "period": period_from_raw(signed_date) or period_from_raw(complete_date),
@@ -612,9 +679,12 @@ class SaveParser:
             offered_fee = self._to_float(row.get("offeredfee"), 0.0)
             future_fee = self._to_float(row.get("future_fee"), 0.0)
             amount = offered_fee if offered_fee > 0 else future_fee
+            is_loan_buy = self._to_int(row.get("isloanbuy"), 0)
             is_buy = offer_team_id == user_team_id and source_team_id > 0 and source_team_id != user_team_id
             is_sell = source_team_id == user_team_id and offer_team_id > 0 and offer_team_id != user_team_id
-            if amount <= 0 or (not is_buy and not is_sell):
+            if (not is_buy and not is_sell) or not row_counts_as_transfer(
+                float(amount), is_loan_buy, complete_date, signed_date
+            ):
                 continue
             key = (player_id, signed_date, source_team_id, offer_team_id, int(amount))
             if key in seen:
@@ -634,7 +704,7 @@ class SaveParser:
                     "fee": round(amount, 2),
                     "type": "buy" if is_buy else "sell",
                     "direction": "in" if is_buy else "out",
-                    "is_loan_buy": self._to_int(row.get("isloanbuy"), 0),
+                    "is_loan_buy": is_loan_buy,
                     "signed_date": signed_date,
                     "completed_date": complete_date,
                     "period": period_from_raw(signed_date) or period_from_raw(complete_date),

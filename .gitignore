@@ -6,18 +6,26 @@ __pycache__/
 .mypy_cache/
 
 .env
-.env.*
-*.env
+.env.local
+.env.development
+.env.production
+.env.test
+!.env.example
 *.local
 
 *.key
 *.pem
 
 *.db
+*.db-journal
 
 node_modules/
 dist/
 dist-ssr/
+
+# FC Companion — build PyInstaller (regenerável)
+fc-companion/launcher/build/
+fc-companion/launcher/dist/
 
 .trae/
 .vscode/

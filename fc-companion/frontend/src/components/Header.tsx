@@ -22,14 +22,15 @@ export function Header() {
   ].filter(Boolean);
   const repScore = coachProfile.reputation_score || manager.reputation || 50;
   const fanScore = coachProfile.fan_sentiment_score || manager.reputation || 50;
-  const tempCount = legacyProfile.seasons_count || 1;
+  // Temporada da carreira (save), não "temporadas no legado" / hall of fame
+  const tempCount = seasonContext?.career_season ?? legacyProfile.seasons_count ?? 1;
   const repLabel = coachProfile.reputation_label || 'DESCONHECIDO';
   const form = recentForm.length > 0
     ? recentForm.map((item: string) => (item === 'W' ? 'V' : item === 'D' ? 'E' : 'D'))
     : [];
 
   return (
-    <header className="sticky top-0 z-50 bg-[#0a140d]/90 backdrop-blur-md border-b border-white/10 px-4 py-3">
+    <header className="sticky top-0 z-50 bg-[#0a140d]/90 backdrop-blur-md border-b border-white/10 px-4 md:px-6 lg:px-8 py-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           {/* Badge Placeholder */}

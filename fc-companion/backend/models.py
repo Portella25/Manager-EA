@@ -230,10 +230,36 @@ class CoachProfileRecord(BaseModel):
     updated_at: datetime
 
 
+class InternalCommsMessageIn(BaseModel):
+    role: str  # npc | coach
+    text: str
+
+
+class InternalCommsStepIn(BaseModel):
+    save_uid: Optional[str] = None
+    audience: str = "board"  # board | players | staff
+    interaction_mode: str = "group"  # group | one_on_one
+    focus_player_id: Optional[int] = None
+    focus_player_name: Optional[str] = None
+    linked_headline: Optional[str] = None
+    touchpoint_context: Optional[str] = None
+    topic_type_hint: Optional[str] = None
+    messages: List[InternalCommsMessageIn] = Field(default_factory=list)
+
+
 class PressConferenceIn(BaseModel):
     question: str
-    answer: str
+    answer: str = ""
     save_uid: Optional[str] = None
+    audience: Optional[str] = None  # board | players | staff
+    response_style: Optional[str] = None  # aggressive | calm | motivational | analytical (ou agressive p/ compat)
+    topic_type: Optional[str] = None  # match | form | market | player | board | medical | locker_room | season
+    focus_player_id: Optional[int] = None
+    focus_player_name: Optional[str] = None
+    interaction_mode: Optional[str] = None  # group | one_on_one
+    linked_article_id: Optional[str] = None
+    linked_headline: Optional[str] = None
+    social_internal_comms: Optional[bool] = None  # True: interação aba Social; aplica limite 1/dia no save
 
 
 class PressConferenceOut(BaseModel):

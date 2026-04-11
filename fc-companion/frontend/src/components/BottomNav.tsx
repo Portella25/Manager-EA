@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Home, Users, Briefcase, BookOpen, ArrowRightLeft, MessageSquare, Wallet } from 'lucide-react'
+import { Home, Users, Briefcase, BookOpen, ArrowRightLeft, MessageSquare, Wallet, BarChart2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { path: '/mercado', label: 'MERCADO', icon: ArrowRightLeft },
   { path: '/social', label: 'SOCIAL', icon: MessageSquare },
   { path: '/financas', label: 'FINANÇAS', icon: Wallet },
+  { path: '/estatisticas', label: 'STATS', icon: BarChart2 },
   { path: '/carreira', label: 'CARREIRA', icon: Briefcase },
   { path: '/legado', label: 'LEGADO', icon: BookOpen },
 ]
@@ -15,7 +16,7 @@ const navItems = [
 export function BottomNav() {
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-[#0a140d]/95 backdrop-blur-md border-t border-white/10 pb-safe z-50">
-      <div className="flex justify-around items-center h-16 px-2">
+      <div className="flex justify-around items-center h-16 px-2 mx-auto w-full max-w-md md:max-w-3xl lg:max-w-5xl xl:max-w-6xl">
         {navItems.map(({ path, label, icon: Icon }) => (
           <NavLink
             key={path}

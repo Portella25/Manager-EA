@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +42,7 @@ from database import (
     get_or_create_coach_profile,
     get_recent_press_conferences,
     get_recent_feed,
+    merge_career_facts,
     get_narratives_by_event_type,
     get_recent_events,
     get_recent_narratives,
@@ -74,6 +75,7 @@ from database import (
     get_external_artifact,
     get_recent_external_event_logs,
     upsert_match_result_from_match_event,
+    count_press_conferences_for_game_date,
 )
 from board_engine import BoardEngine
 from achievements_engine import AchievementsEngine
@@ -81,27 +83,141 @@ from meta_achievements_engine import MetaAchievementsEngine
 from crisis_engine import CrisisEngine
 from editorial_engine import EditorialEngine
 from front_read_models import (
+    _iso_game_date,
+    _read_state,
     build_conference_context,
     build_dashboard_home,
     build_finance_hub,
     build_news_feed_daily,
+    build_press_fallout_career_facts,
     build_season_context,
     build_squad_overview,
+    enrich_companion_overview_payload,
     rebuild_news_feed_daily,
 )
 from market_engine import MarketEngine
-from models import CareerManagementPatchIn, CrisisTriggerIn, InternalEventIn, MarketRumorIn, NarrativeIn, PlayerRelationPatchIn, PressConferenceIn, SeasonArcMemoryIn, SeasonArcTriggerIn, SeasonPayoffIn, TimelineEntryIn
+from models import (
+    CareerManagementPatchIn,
+    CrisisTriggerIn,
+    InternalCommsStepIn,
+    InternalEventIn,
+    MarketRumorIn,
+    NarrativeIn,
+    PlayerRelationPatchIn,
+    PressConferenceIn,
+    SeasonArcMemoryIn,
+    SeasonArcTriggerIn,
+    SeasonPayoffIn,
+    TimelineEntryIn,
+)
 from hall_of_fame_engine import HallOfFameEngine
 from legacy_engine import LegacyEngine
 from legacy_hub import build_legacy_hub
+from external_ingestion import ExternalIngestion
 from payoff_engine import PayoffEngine
 from narrative_engine import NarrativeEngine
 from reputation_engine import ReputationEngine
 from season_arc_engine import SeasonArcEngine
 from career_dynamics_engine import CareerDynamicsEngine
+from player_relation_press import apply_one_on_one_interaction_to_relation
+from internal_comms_lock import record_internal_comms_completed
+from competition_stats import (
+    build_competition_stats_response,
+    competition_stats_from_save_probe,
+    load_lua_competition_block,
+)
+from save_reader.transfer_history_from_save import get_transfer_history_from_career_save
 
 
 STATE_PATH = Path.home() / "Desktop" / "fc_companion" / "state.json"
+COMPANION_DATA_DIR = Path.home() / "Desktop" / "fc_companion"
+
+
+def _resolve_club_team_id_from_state(state: Dict[str, Any]) -> int:
+    club = state.get("club") or {}
+    try:
+        tid = int(club.get("team_id") or 0)
+    except (TypeError, ValueError):
+        tid = 0
+    if tid > 0:
+        return tid
+    mgr = state.get("manager") or {}
+    try:
+        return int(mgr.get("clubteamid") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _hydrate_state_club_from_lua(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Garante club.team_id para histórico do save quando state.json está incompleto."""
+    if _resolve_club_team_id_from_state(state) > 0:
+        return state
+    lua_path = COMPANION_DATA_DIR / "state_lua.json"
+    if not lua_path.exists():
+        return state
+    try:
+        lua = json.loads(lua_path.read_text(encoding="utf-8"))
+        c = lua.get("club")
+        if isinstance(c, dict) and c.get("team_id"):
+            merged = dict(state) if state else {}
+            merged_club = {**(merged.get("club") or {}), **c}
+            merged["club"] = merged_club
+            return merged
+    except Exception:
+        pass
+    return state
+
+
+def _read_save_data_transfer_history_disk() -> List[Dict[str, Any]]:
+    """Fallback quando state.json ainda não tem transfer_history do save (merge atrasado)."""
+    path = COMPANION_DATA_DIR / "save_data.json"
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        th = data.get("transfer_history")
+        return list(th) if isinstance(th, list) else []
+    except Exception:
+        return []
+
+
+def _merge_market_live_club_history(
+    th_payload: Dict[str, Any], state: Dict[str, Any]
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Prioridade: LE items → state.transfer_history → save_data.json em disco."""
+    le_items = list(th_payload.get("items") or [])
+    summary = dict(th_payload.get("summary") or {})
+    summary["le_club_item_count"] = len(le_items)
+    state_th = list(state.get("transfer_history") or [])
+    disk_th = _read_save_data_transfer_history_disk()
+    if le_items:
+        summary["club_history_source"] = "live_editor"
+        summary["count"] = len(le_items)
+        return le_items, summary
+    if state_th:
+        summary["club_history_source"] = "state_merge"
+        summary["count"] = len(state_th)
+        return state_th, summary
+    if disk_th:
+        summary["club_history_source"] = "save_data_json"
+        summary["count"] = len(disk_th)
+        return disk_th, summary
+    tid = _resolve_club_team_id_from_state(state)
+    if tid > 0:
+        try:
+            sql_th = get_transfer_history_from_career_save(tid)
+        except Exception:
+            sql_th = []
+        if sql_th:
+            summary["club_history_source"] = "save_sqlite_direct"
+            summary["count"] = len(sql_th)
+            summary["club_team_id_used"] = tid
+            return sql_th, summary
+    summary["club_history_source"] = "empty"
+    summary["count"] = 0
+    return [], summary
+
 
 app = FastAPI(title="FC Companion Backend", version="1.0.0")
 narrative_engine = NarrativeEngine()
@@ -265,6 +381,168 @@ def get_state_reference(save_uid: str = Query(...)) -> JSONResponse:
     payload = get_external_artifact(save_uid, "reference_data")
     if payload is None:
         raise HTTPException(status_code=404, detail="reference_data.json ainda não ingerido para este save_uid")
+    return JSONResponse(content=payload, media_type="application/json")
+
+
+@app.get("/stats/players")
+def get_player_stats(save_uid: Optional[str] = Query(default=None)) -> JSONResponse:
+    """Ranking completo de jogadores por gols, assistências e jogos na temporada."""
+    state = {}
+    try:
+        state = read_state()
+    except HTTPException:
+        pass
+    effective_save_uid = save_uid or str(((state.get("meta") or {}).get("save_uid")) or "") or None
+
+    # Mapa playerid → nome (via squad do state ou save)
+    name_map: Dict[int, str] = {}
+    position_map: Dict[int, str] = {}
+    overall_map: Dict[int, int] = {}
+
+    for player in state.get("squad") or []:
+        pid = int(player.get("playerid") or 0)
+        if pid <= 0:
+            continue
+        # resolve nome
+        for key in ("player_name", "commonname", "name"):
+            v = str(player.get(key) or "").strip()
+            if v and not v.isdigit():
+                name_map[pid] = v
+                break
+        if pid not in name_map:
+            first = str(player.get("firstname") or "").strip()
+            last = str(player.get("lastname") or "").strip()
+            full = f"{first} {last}".strip()
+            name_map[pid] = full or f"#{pid}"
+        position_map[pid] = str(player.get("position_label") or player.get("position") or "")
+        overall_map[pid] = int(player.get("overallrating") or player.get("overall") or 0)
+
+    # Carrega stats de cada jogador via save_parser (teamplayerlinks)
+    scorers: List[Dict[str, Any]] = []
+    assisters: List[Dict[str, Any]] = []
+    all_players: Dict[int, Dict[str, Any]] = {}
+
+    # Fonte 1: player_stats exportado pelo Lua (mais atualizado)
+    lua_state_path = Path.home() / "Desktop" / "fc_companion" / "state_lua.json"
+    if lua_state_path.exists():
+        try:
+            lua_data = json.loads(lua_state_path.read_bytes())
+            lua_stats: List[Dict[str, Any]] = lua_data.get("player_stats") or []
+            for row in lua_stats:
+                pid = int(row.get("playerid") or 0)
+                if pid <= 0:
+                    continue
+                all_players[pid] = {
+                    "playerid": pid,
+                    "name": name_map.get(pid, f"#{pid}"),
+                    "position": position_map.get(pid, ""),
+                    "overall": overall_map.get(pid, 0),
+                    "goals": int(row.get("goals") or 0),
+                    "assists": int(row.get("assists") or 0),
+                    "appearances": int(row.get("appearances") or 0),
+                    "clean_sheets": int(row.get("clean_sheets") or 0),
+                    "yellow_cards": int(row.get("yellow_cards") or 0),
+                    "red_cards": int(row.get("red_cards") or 0),
+                }
+        except Exception:
+            pass
+
+    # Fonte 2: save_probe/teamplayerlinks.json como fallback
+    if not all_players:
+        try:
+            probe_root = Path.home() / "Desktop" / "fc_companion" / "save_probe"
+            save_dirs = [d for d in probe_root.iterdir() if d.is_dir()] if probe_root.exists() else []
+            if save_dirs:
+                latest_dir = max(save_dirs, key=lambda d: d.stat().st_mtime)
+                tpl_path = latest_dir / "db_1" / "teamplayerlinks.json"
+                cu_path = latest_dir / "db_0" / "career_users.json"
+                if tpl_path.exists() and cu_path.exists():
+                    cu = json.loads(cu_path.read_bytes())
+                    team_id = int((cu[0] if cu else {}).get("clubteamid") or -1)
+                    tpl = json.loads(tpl_path.read_bytes())
+                    for row in tpl:
+                        if int(row.get("teamid") or -1) != team_id:
+                            continue
+                        pid = int(row.get("playerid") or 0)
+                        if pid <= 0:
+                            continue
+                        all_players[pid] = {
+                            "playerid": pid,
+                            "name": name_map.get(pid, f"#{pid}"),
+                            "position": position_map.get(pid, ""),
+                            "overall": overall_map.get(pid, 0),
+                            "goals": int(row.get("leaguegoals") or 0),
+                            "assists": int(row.get("leagueassists") or row.get("assists") or 0),
+                            "appearances": int(row.get("leagueappearances") or 0),
+                            "clean_sheets": int(row.get("leaguecleansheets") or 0),
+                            "yellow_cards": int(row.get("yellows") or 0),
+                            "red_cards": int(row.get("reds") or 0),
+                        }
+        except Exception:
+            pass
+
+    # Garante que todos os jogadores do squad aparecem (mesmo com stats zeradas)
+    for pid, pname in name_map.items():
+        if pid not in all_players:
+            all_players[pid] = {
+                "playerid": pid,
+                "name": pname,
+                "position": position_map.get(pid, ""),
+                "overall": overall_map.get(pid, 0),
+                "goals": 0,
+                "assists": 0,
+                "appearances": 0,
+                "clean_sheets": 0,
+                "yellow_cards": 0,
+                "red_cards": 0,
+            }
+
+    # Fallback final: season_stats do state tem pelo menos top scorer/assist
+    if not all_players:
+        club = state.get("club") or {}
+        ss = club.get("season_stats") or {}
+        ts = ss.get("top_scorer") or {}
+        ta = ss.get("top_assist") or {}
+        if ts.get("playerid"):
+            pid = int(ts["playerid"])
+            all_players[pid] = {"playerid": pid, "name": name_map.get(pid, f"#{pid}"), "position": position_map.get(pid, ""), "overall": overall_map.get(pid, 0), "goals": int(ts.get("total_goals") or 0), "assists": 0, "appearances": 0, "clean_sheets": 0}
+        if ta.get("playerid"):
+            pid = int(ta["playerid"])
+            existing = all_players.get(pid, {"playerid": pid, "name": name_map.get(pid, f"#{pid}"), "position": position_map.get(pid, ""), "overall": overall_map.get(pid, 0), "goals": 0, "appearances": 0, "clean_sheets": 0})
+            existing["assists"] = int(ta.get("total_assists") or 0)
+            all_players[pid] = existing
+
+    players_list = list(all_players.values())
+    scorers = sorted([p for p in players_list if p["goals"] > 0], key=lambda x: (-x["goals"], -x["assists"]))
+    assisters = sorted([p for p in players_list if p["assists"] > 0], key=lambda x: (-x["assists"], -x["goals"]))
+    most_played_filtered = [p for p in players_list if p["appearances"] > 0]
+    most_played = sorted(most_played_filtered if most_played_filtered else players_list, key=lambda x: (-x["appearances"], -x["overall"]))
+
+    return JSONResponse(content={
+        "scorers": scorers,
+        "assisters": assisters,
+        "most_played": most_played,
+        "all_players": players_list,
+        "total_squad": len(players_list),
+    })
+
+
+@app.get("/stats/competitions")
+def get_stats_competitions() -> JSONResponse:
+    """Estatísticas por competição (Lua career_playerstats + progress; fallback save_probe)."""
+    state: Dict[str, Any] = {}
+    try:
+        state = read_state()
+    except HTTPException:
+        pass
+    squad = state.get("squad") if isinstance(state.get("squad"), list) else []
+    lua_block = load_lua_competition_block()
+    payload = build_competition_stats_response(squad, lua_block)
+    club_comps = (payload.get("club") or {}).get("competitions") or []
+    if not any(c.get("has_player_stats") for c in club_comps):
+        alt = competition_stats_from_save_probe(squad)
+        if alt:
+            payload = alt
     return JSONResponse(content=payload, media_type="application/json")
 
 
@@ -509,7 +787,7 @@ def internal_event(event: InternalEventIn) -> JSONResponse:
                 playerid=int(rel["playerid"]),
                 player_name=rel.get("player_name"),
                 trust=int(rel.get("trust") or 50),
-                role_label=str(rel.get("role_label") or "rotacao"),
+                role_label=str(rel.get("role_label") or "Rodízio"),
                 status_label=str(rel.get("status_label") or "neutro"),
                 frustration=int(rel.get("frustration") or 0),
                 notes=dict(rel.get("notes") or {}),
@@ -805,7 +1083,7 @@ def internal_event(event: InternalEventIn) -> JSONResponse:
                         )
         else:
             if season_arc_engine.should_start(event.event_type):
-                season_label = str(((event.payload or {}).get("new_season")) or ((event.payload or {}).get("old_season")) or "current")
+                season_label = str(((event.payload or {}).get("new_season")) or ((event.payload or {}).get("old_season")) or "atual")
                 start_data = season_arc_engine.build_start(profile_payload, season_label=season_label)
                 created_arc = create_season_arc(
                     save_uid=event.save_uid,
@@ -948,12 +1226,34 @@ def companion_overview(
         state = read_state()
     except HTTPException:
         state = {}
+    state = _hydrate_state_club_from_lua(state)
     effective_save_uid = save_uid or str(((state.get("meta") or {}).get("save_uid")) or "") or None
+    # transfer_history.json fica em fc_companion/{save_uid}/ e o watcher só dispara com state_lua/save_data;
+    # reingerir aqui garante dados frescos ao abrir o Mercado sem reiniciar o watcher.
+    if effective_save_uid:
+        ExternalIngestion().ingest_json_artifact(
+            effective_save_uid, "transfer_history.json", "transfer_history"
+        )
+    th_artifact = get_external_artifact(effective_save_uid, "transfer_history") if effective_save_uid else None
+    th_payload = (th_artifact or {}).get("payload") or {}
+    club_rows, club_summary = _merge_market_live_club_history(th_payload, state)
+    market_live = {
+        "source": "live_editor",
+        "updated_at": (th_artifact or {}).get("updated_at"),
+        "history_club": club_rows,
+        "history_world": th_payload.get("items_world") or [],
+        "summary": club_summary,
+        "meta_export": th_payload.get("meta") or {},
+    }
     payload = {
         "state": {
             "meta": state.get("meta"),
             "manager": state.get("manager"),
             "club": state.get("club"),
+            "transfer_offers": state.get("transfer_offers") or [],
+            "transfer_history": state.get("transfer_history") or [],
+            "market_live": market_live,
+            "finance_live": state.get("finance_live") or {},
         },
         "season_context": build_season_context(effective_save_uid, state=state) if effective_save_uid else None,
         "events_recent": get_recent_events(limit=events_limit, save_uid=effective_save_uid),
@@ -979,9 +1279,10 @@ def companion_overview(
         "schema_catalog": get_external_artifact(effective_save_uid, "schema") if effective_save_uid else None,
         "reference_data": get_external_artifact(effective_save_uid, "reference_data") if effective_save_uid else None,
         "season_stats": get_external_artifact(effective_save_uid, "season_stats") if effective_save_uid else None,
-        "transfer_history_dataset": get_external_artifact(effective_save_uid, "transfer_history") if effective_save_uid else None,
+        "transfer_history_dataset": th_artifact if effective_save_uid else None,
         "external_events_recent": get_recent_external_event_logs(effective_save_uid, limit=30) if effective_save_uid else [],
     }
+    enrich_companion_overview_payload(payload, state)
     return JSONResponse(content=payload, media_type="application/json")
 
 
@@ -989,7 +1290,7 @@ def companion_overview(
 def news_feed_daily(
     save_uid: str = Query(...),
     date: Optional[str] = Query(default=None),
-    limit: int = Query(default=5, ge=1, le=5),
+    limit: int = Query(default=7, ge=1, le=10),
 ) -> JSONResponse:
     payload = build_news_feed_daily(save_uid=save_uid, date=date, limit=limit)
     return JSONResponse(content=payload, media_type="application/json")
@@ -999,7 +1300,7 @@ def news_feed_daily(
 def news_feed_daily_rebuild(
     save_uid: str = Query(...),
     date: Optional[str] = Query(default=None),
-    limit: int = Query(default=5, ge=1, le=5),
+    limit: int = Query(default=7, ge=1, le=10),
 ) -> JSONResponse:
     payload = rebuild_news_feed_daily(save_uid=save_uid, date=date, limit=limit)
     return JSONResponse(content=payload, media_type="application/json")
@@ -1104,7 +1405,7 @@ def career_player_relation_patch(data: PlayerRelationPatchIn) -> JSONResponse:
         playerid=int(data.playerid),
         player_name=data.player_name or existing.get("player_name"),
         trust=int(data.trust) if data.trust is not None else int(existing.get("trust") or 50),
-        role_label=str(data.role_label or existing.get("role_label") or "rotacao"),
+        role_label=str(data.role_label or existing.get("role_label") or "Rodízio"),
         status_label=str(data.status_label or existing.get("status_label") or "neutro"),
         frustration=int(data.frustration) if data.frustration is not None else int(existing.get("frustration") or 0),
         notes=dict(data.notes) if data.notes is not None else dict(existing.get("notes") or {}),
@@ -1153,17 +1454,65 @@ def fan_sentiment(save_uid: str = Query(...)) -> JSONResponse:
     return JSONResponse(content=payload, media_type="application/json")
 
 
+def _internal_comms_step_handler(data: InternalCommsStepIn) -> JSONResponse:
+    from internal_comms_engine import run_internal_comms_step
+
+    msgs = [{"role": m.role, "text": m.text} for m in data.messages]
+    out = run_internal_comms_step(
+        save_uid=data.save_uid or "",
+        audience=(data.audience or "board").strip().lower(),
+        interaction_mode=(data.interaction_mode or "group").strip().lower(),
+        focus_player_id=data.focus_player_id,
+        focus_player_name=data.focus_player_name,
+        linked_headline=data.linked_headline,
+        touchpoint_context=data.touchpoint_context,
+        messages=msgs,
+    )
+    return JSONResponse(content=out, media_type="application/json")
+
+
+@app.post("/internal-comms/step")
+def internal_comms_step(data: InternalCommsStepIn) -> JSONResponse:
+    return _internal_comms_step_handler(data)
+
+
+@app.post("/companion/internal-comms/step")
+def companion_internal_comms_step(data: InternalCommsStepIn) -> JSONResponse:
+    """Alias estável (mesmo prefixo que /companion/overview) para proxy e SPA não confundirem com static."""
+    return _internal_comms_step_handler(data)
+
+
 @app.post("/press-conference/respond")
 def press_conference_respond(data: PressConferenceIn) -> JSONResponse:
-    tone, reputation_delta, morale_delta = reputation_engine.analyze_press_answer(data.answer)
-    headline = f"Coletiva: tom {tone} após resposta do treinador"
-    board_reaction = "A diretoria vê discurso alinhado ao plano." if reputation_delta >= 0 else "A diretoria cobra comunicação mais estratégica."
-    locker_room_reaction = "O vestiário sente confiança no comando." if morale_delta >= 0 else "O vestiário demonstra desconforto com o tom adotado."
-    fan_reaction = "A torcida aprova a postura pública." if reputation_delta >= 0 else "A torcida reage com críticas nas redes."
+    from press_narrative import build_coach_press_answer, build_press_headline, build_press_reactions
+
+    answer_text = (data.answer or "").strip()
+    style = (data.response_style or "").strip().lower()
+    audience = (data.audience or "").strip().lower() or None
+    if style:
+        answer_text = build_coach_press_answer(
+            style,
+            audience or "board",
+            data.question,
+            data.save_uid,
+            topic_type=data.topic_type,
+            focus_player_name=data.focus_player_name,
+            interaction_mode=data.interaction_mode,
+            linked_headline=data.linked_headline,
+        )
+    tone, reputation_delta, morale_delta = reputation_engine.analyze_press_answer(answer_text)
+    board_active = get_active_board_challenge(data.save_uid, "ULTIMATUM") if data.save_uid else None
+    crisis_active = get_active_crisis_arc(data.save_uid) if data.save_uid else None
+    headline = build_press_headline(tone, audience, reputation_delta)
+    reactions = build_press_reactions(tone, audience, reputation_delta, morale_delta, bool(board_active), bool(crisis_active))
+    board_reaction = reactions["board"]
+    locker_room_reaction = reactions["locker_room"]
+    fan_reaction = reactions["fan"]
+    current_game_date = _iso_game_date(_read_state())
     conference_id = save_press_conference(
         save_uid=data.save_uid,
         question=data.question,
-        answer=data.answer,
+        answer=answer_text,
         detected_tone=tone,
         reputation_delta=reputation_delta,
         morale_delta=morale_delta,
@@ -1171,6 +1520,7 @@ def press_conference_respond(data: PressConferenceIn) -> JSONResponse:
         board_reaction=board_reaction,
         locker_room_reaction=locker_room_reaction,
         fan_reaction=fan_reaction,
+        game_date=current_game_date,
     )
     profile_payload = None
     if data.save_uid:
@@ -1185,20 +1535,71 @@ def press_conference_respond(data: PressConferenceIn) -> JSONResponse:
             fan_sentiment_score=fan_sentiment_score,
             fan_sentiment_label=reputation_engine.fan_label(fan_sentiment_score),
         )
-    return JSONResponse(
-        content={
-            "id": conference_id,
-            "detected_tone": tone,
-            "reputation_delta": reputation_delta,
-            "morale_delta": morale_delta,
-            "headline": headline,
-            "board_reaction": board_reaction,
-            "locker_room_reaction": locker_room_reaction,
-            "fan_reaction": fan_reaction,
-            "coach_profile": profile_payload,
-        },
-        media_type="application/json",
-    )
+    press_fallout: Optional[Dict[str, Any]] = None
+    if data.save_uid and current_game_date:
+        fallout_facts = build_press_fallout_career_facts(
+            save_uid=data.save_uid,
+            game_date=current_game_date,
+            conference_id=conference_id,
+            headline=headline,
+            board_reaction=board_reaction,
+            locker_room_reaction=locker_room_reaction,
+            fan_reaction=fan_reaction,
+            audience=audience,
+            focus_player_name=data.focus_player_name,
+            linked_headline=data.linked_headline,
+            detected_tone=tone,
+            reputation_delta=reputation_delta,
+            morale_delta=morale_delta,
+        )
+        merged_facts = merge_career_facts(data.save_uid, current_game_date, fallout_facts)
+        fid = save_feed_item(
+            event_type="PRESS_CONFERENCE_FALLOUT",
+            channel="press",
+            title=headline[:180],
+            content=(answer_text[:500] + "\n\n—\n\n" + fan_reaction[:400]).strip(),
+            tone=tone,
+            source="press_conference",
+            save_uid=data.save_uid,
+        )
+        press_fallout = {"career_facts_count": len(merged_facts), "feed_item_id": fid}
+    payload_out: Dict[str, Any] = {
+        "id": conference_id,
+        "detected_tone": tone,
+        "reputation_delta": reputation_delta,
+        "morale_delta": morale_delta,
+        "headline": headline,
+        "board_reaction": board_reaction,
+        "locker_room_reaction": locker_room_reaction,
+        "fan_reaction": fan_reaction,
+        "coach_profile": profile_payload,
+        "answer_rendered": answer_text,
+        "audience": audience,
+        "response_style": style or None,
+    }
+    if press_fallout is not None:
+        payload_out["press_fallout"] = press_fallout
+    if (
+        data.save_uid
+        and data.focus_player_id
+        and str(data.audience or "").strip().lower() == "players"
+        and str(data.interaction_mode or "").strip().lower() == "one_on_one"
+    ):
+        pr_up = apply_one_on_one_interaction_to_relation(
+            save_uid=data.save_uid,
+            player_id=int(data.focus_player_id),
+            player_name=data.focus_player_name,
+            tone=tone,
+            reputation_delta=reputation_delta,
+            morale_delta=morale_delta,
+        )
+        if pr_up:
+            payload_out["player_relation_update"] = pr_up
+    if bool(getattr(data, "social_internal_comms", False)) and data.save_uid and current_game_date:
+        record_internal_comms_completed(data.save_uid, current_game_date)
+        payload_out["internal_comms_day_locked"] = True
+        payload_out["locked_game_date"] = current_game_date
+    return JSONResponse(content=payload_out, media_type="application/json")
 
 
 @app.get("/press-conference/recent")
@@ -1676,6 +2077,58 @@ def timeline_generate(data: TimelineEntryIn) -> JSONResponse:
         media_type="application/json",
     )
 
+# ── Uploads de imagens (troféus e escudos de clube) ──────────────────────────
+_UPLOADS_DIR = Path(__file__).parent / "uploads"
+_UPLOADS_DIR.mkdir(exist_ok=True)
+(_UPLOADS_DIR / "trophies").mkdir(exist_ok=True)
+(_UPLOADS_DIR / "clubs").mkdir(exist_ok=True)
+
+_ALLOWED_IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+
+
+def _safe_filename(name: str) -> str:
+    import re
+    name = re.sub(r"[^\w\-.]", "_", name.strip())
+    return name[:120] if name else "image"
+
+
+@app.post("/uploads/trophy")
+async def upload_trophy_image(
+    trophy_key: str = Query(..., description="Chave única do troféu, ex: domestic_cup_1"),
+    file: UploadFile = File(...),
+):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _ALLOWED_IMG_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Formato não suportado. Use JPG, PNG, WebP ou SVG.")
+    dest = _UPLOADS_DIR / "trophies" / f"{_safe_filename(trophy_key)}{ext}"
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"url": f"/uploads/trophies/{dest.name}", "key": trophy_key}
+
+
+@app.post("/uploads/club")
+async def upload_club_image(
+    club_name: str = Query(..., description="Nome do clube"),
+    file: UploadFile = File(...),
+):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _ALLOWED_IMG_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Formato não suportado. Use JPG, PNG, WebP ou SVG.")
+    dest = _UPLOADS_DIR / "clubs" / f"{_safe_filename(club_name)}{ext}"
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"url": f"/uploads/clubs/{dest.name}", "club_name": club_name}
+
+
+@app.get("/uploads/list")
+def list_uploads():
+    trophies = [f"/uploads/trophies/{f.name}" for f in (_UPLOADS_DIR / "trophies").iterdir() if f.is_file()]
+    clubs = [f"/uploads/clubs/{f.name}" for f in (_UPLOADS_DIR / "clubs").iterdir() if f.is_file()]
+    return {"trophies": trophies, "clubs": clubs}
+
+
+app.mount("/uploads", StaticFiles(directory=str(_UPLOADS_DIR)), name="uploads")
+
 # Mount Frontend PWA
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
@@ -1684,7 +2137,7 @@ if frontend_dist.exists():
 @app.exception_handler(404)
 async def custom_404_handler(request: Request, exc: HTTPException):
     # Fallback to index.html for SPA routing
-    if request.method == "GET" and not request.url.path.startswith(("/api", "/state", "/events", "/feed", "/companion", "/career", "/profile", "/torcida", "/press-conference", "/board", "/crisis", "/season-arc", "/legacy", "/hall-of-fame", "/achievements", "/meta-achievements", "/market", "/timeline", "/dashboard", "/news", "/conference", "/finance")):
+    if request.method == "GET" and not request.url.path.startswith(("/api", "/state", "/events", "/feed", "/companion", "/career", "/profile", "/torcida", "/press-conference", "/board", "/crisis", "/season-arc", "/legacy", "/hall-of-fame", "/achievements", "/meta-achievements", "/market", "/timeline", "/dashboard", "/news", "/conference", "/finance", "/uploads", "/stats")):
         index_file = frontend_dist / "index.html"
         if index_file.exists():
             return FileResponse(index_file)

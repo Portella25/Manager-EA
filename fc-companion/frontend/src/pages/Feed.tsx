@@ -145,10 +145,15 @@ export function Feed() {
             <p className="text-[9px] uppercase tracking-[0.2em] text-text-secondary">Pressão</p>
             <p className={`text-xl font-condensed font-bold mt-1 ${scoreTone(100 - (heroPanel?.club_health?.board_confidence_score ?? 50), true)}`}>{100 - (heroPanel?.club_health?.board_confidence_score ?? 50)}</p>
           </div>
-          <div className="rounded-xl border border-white/10 bg-black/20 p-2 text-center">
+          <button
+            type="button"
+            onClick={() => navigate('/status-fisico')}
+            className="rounded-xl border border-white/10 bg-black/20 p-2 text-center hover:border-semantic-blue/40 transition-colors w-full"
+          >
             <p className="text-[9px] uppercase tracking-[0.2em] text-text-secondary">Médico</p>
             <p className={`text-xl font-condensed font-bold mt-1 ${scoreTone(heroPanel?.club_health?.injury_risk_score, true)}`}>{heroPanel?.club_health?.injury_risk_score ?? '--'}</p>
-          </div>
+            <p className="text-[8px] text-semantic-blue mt-1 uppercase">Abrir status físico</p>
+          </button>
         </div>
       </section>
 

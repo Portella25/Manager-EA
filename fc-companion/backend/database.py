@@ -121,6 +121,7 @@ class PressConferenceRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     save_uid: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    game_date: Mapped[Optional[str]] = mapped_column(String(12), nullable=True, index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     detected_tone: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -447,9 +448,25 @@ engine = create_engine(DATABASE_URL, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+def _migrate_press_conferences_game_date() -> None:
+    """Add game_date column if missing (SQLite)."""
+    import sqlite3 as _sqlite3
+    db_path = str(DB_PATH)
+    try:
+        conn = _sqlite3.connect(db_path)
+        cur = conn.execute("PRAGMA table_info(press_conferences)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "game_date" not in cols:
+            conn.execute("ALTER TABLE press_conferences ADD COLUMN game_date VARCHAR(12)")
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def init_db() -> None:
-    # Cria tabelas automaticamente na primeira execução.
     Base.metadata.create_all(bind=engine)
+    _migrate_press_conferences_game_date()
 
 
 def _serialize_payload(payload: Dict[str, Any]) -> str:
@@ -800,6 +817,7 @@ def replace_career_facts(save_uid: str, game_date: str, facts: List[Dict[str, An
         ).scalars().all()
         for row in rows:
             session.delete(row)
+        session.flush()
         now = datetime.utcnow()
         for fact in facts:
             editorial_flags = dict(fact.get("editorial_flags") or {})
@@ -828,6 +846,29 @@ def replace_career_facts(save_uid: str, game_date: str, facts: List[Dict[str, An
             session.add(row)
         session.commit()
     return get_career_facts(save_uid=save_uid, game_date=game_date)
+
+
+def merge_career_facts(save_uid: str, game_date: str, new_facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mescla novos factos no dia por dedupe_group (novos sobrescrevem chave igual) sem apagar os restantes."""
+    existing = get_career_facts(save_uid=save_uid, game_date=game_date, limit=500)
+    by_dedupe: Dict[str, Dict[str, Any]] = {}
+    for ef in existing:
+        dg = str(ef.get("dedupe_group") or (ef.get("editorial_flags") or {}).get("dedupe_group") or "").strip()
+        if not dg:
+            dg = f"_legacy_id_{ef.get('id')}"
+        clean = {k: v for k, v in ef.items() if k != "id"}
+        by_dedupe[dg] = clean
+    for nf in new_facts:
+        fact = dict(nf)
+        editorial = dict(fact.get("editorial_flags") or {})
+        dg = str(editorial.get("dedupe_group") or fact.get("dedupe_group") or "").strip()
+        if not dg:
+            ft = str(fact.get("fact_type") or "fact")
+            dg = f"_nf_{ft}_{abs(hash(json.dumps(fact, sort_keys=True, default=str))) % (10**9)}"
+            editorial["dedupe_group"] = dg
+            fact["editorial_flags"] = editorial
+        by_dedupe[dg] = fact
+    return replace_career_facts(save_uid=save_uid, game_date=game_date, facts=list(by_dedupe.values()))
 
 
 def get_career_facts(
@@ -913,12 +954,28 @@ def replace_news_daily_package(
         for row in existing_articles:
             session.delete(row)
         session.flush()
+        used_slots: set[str] = set()
+
+        def _unique_slot(base: str) -> str:
+            s = base or "lead"
+            if s not in used_slots:
+                used_slots.add(s)
+                return s
+            n = 2
+            while f"{s}_{n}" in used_slots:
+                n += 1
+            out = f"{s}_{n}"
+            used_slots.add(out)
+            return out
+
         for story in stories:
+            base_slot = str(story.get("slot") or "lead")
+            slot_value = _unique_slot(base_slot)
             article = NewsDailyArticleRecord(
                 package_id=package.id,
                 save_uid=save_uid,
                 game_date=game_date,
-                slot=str(story.get("slot") or "lead"),
+                slot=slot_value,
                 kind=str(story.get("kind") or "news"),
                 priority=int(story.get("priority") or 50),
                 impact=str(story.get("impact") or "medium"),
@@ -945,6 +1002,9 @@ def replace_news_daily_package(
 
 
 def get_news_daily_package(save_uid: str, game_date: str) -> Optional[Dict[str, Any]]:
+    """Pacote editorial diário. Enriquece `slot_label` ao ler (histórico sem esse campo no DB)."""
+    from front_read_models import enrich_news_story_for_client
+
     with SessionLocal() as session:
         package = session.execute(
             select(NewsDailyPackageRecord)
@@ -971,27 +1031,29 @@ def get_news_daily_package(save_uid: str, game_date: str) -> Optional[Dict[str, 
             "created_at": package.created_at.isoformat(),
             "updated_at": package.updated_at.isoformat(),
             "stories": [
-                {
-                    "article_id": str(row.id),
-                    "slot": row.slot,
-                    "kind": row.kind,
-                    "priority": row.priority,
-                    "impact": row.impact,
-                    "headline": row.headline,
-                    "subheadline": row.subheadline,
-                    "lead": row.lead,
-                    "body": _deserialize_json(row.body_json, []),
-                    "why_it_matters": row.why_it_matters,
-                    "club_effects": _deserialize_json(row.club_effects_json, []),
-                    "tags": _deserialize_json(row.tags_json, []),
-                    "entities": _deserialize_json(row.entities_json, {}),
-                    "source_facts": _deserialize_json(row.source_facts_json, []),
-                    "cover_image_url": row.cover_image_url,
-                    "theme": "dark_editorial",
-                    "published_at": row.published_at.isoformat(),
-                    "created_at": row.created_at.isoformat(),
-                    "updated_at": row.updated_at.isoformat(),
-                }
+                enrich_news_story_for_client(
+                    {
+                        "article_id": str(row.id),
+                        "slot": row.slot,
+                        "kind": row.kind,
+                        "priority": row.priority,
+                        "impact": row.impact,
+                        "headline": row.headline,
+                        "subheadline": row.subheadline,
+                        "lead": row.lead,
+                        "body": _deserialize_json(row.body_json, []),
+                        "why_it_matters": row.why_it_matters,
+                        "club_effects": _deserialize_json(row.club_effects_json, []),
+                        "tags": _deserialize_json(row.tags_json, []),
+                        "entities": _deserialize_json(row.entities_json, {}),
+                        "source_facts": _deserialize_json(row.source_facts_json, []),
+                        "cover_image_url": row.cover_image_url,
+                        "theme": "dark_editorial",
+                        "published_at": row.published_at.isoformat(),
+                        "created_at": row.created_at.isoformat(),
+                        "updated_at": row.updated_at.isoformat(),
+                    }
+                )
                 for row in articles
             ],
         }
@@ -1085,6 +1147,30 @@ def get_player_relations(save_uid: str, limit: int = 200) -> List[Dict[str, Any]
             }
             for row in rows
         ]
+
+
+def get_player_relation(save_uid: str, playerid: int) -> Optional[Dict[str, Any]]:
+    with SessionLocal() as session:
+        row = session.execute(
+            select(PlayerRelationRecord)
+            .where(PlayerRelationRecord.save_uid == save_uid)
+            .where(PlayerRelationRecord.playerid == int(playerid))
+            .limit(1)
+        ).scalars().first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "save_uid": row.save_uid,
+            "playerid": row.playerid,
+            "player_name": row.player_name,
+            "trust": row.trust,
+            "role_label": row.role_label,
+            "status_label": row.status_label,
+            "frustration": row.frustration,
+            "notes": _deserialize_json(row.notes_json, {}),
+            "updated_at": row.updated_at.isoformat(),
+        }
 
 
 def upsert_player_relation(
@@ -1364,10 +1450,12 @@ def save_press_conference(
     board_reaction: str,
     locker_room_reaction: str,
     fan_reaction: str,
+    game_date: Optional[str] = None,
 ) -> int:
     with SessionLocal() as session:
         row = PressConferenceRecord(
             save_uid=save_uid,
+            game_date=game_date,
             question=question,
             answer=answer,
             detected_tone=detected_tone,
@@ -1395,6 +1483,7 @@ def get_recent_press_conferences(limit: int = 20, save_uid: Optional[str] = None
             {
                 "id": row.id,
                 "save_uid": row.save_uid,
+                "game_date": row.game_date,
                 "question": row.question,
                 "answer": row.answer,
                 "detected_tone": row.detected_tone,
@@ -1408,6 +1497,16 @@ def get_recent_press_conferences(limit: int = 20, save_uid: Optional[str] = None
             }
             for row in rows
         ]
+
+
+def count_press_conferences_for_game_date(save_uid: str, game_date: str) -> int:
+    with SessionLocal() as session:
+        stmt = (
+            select(PressConferenceRecord)
+            .where(PressConferenceRecord.save_uid == save_uid)
+            .where(PressConferenceRecord.game_date == game_date)
+        )
+        return len(session.execute(stmt).scalars().all())
 
 
 def get_recent_match_event_payloads(save_uid: str, limit: int = 5) -> List[Dict[str, Any]]:

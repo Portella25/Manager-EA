@@ -41,6 +41,8 @@ export function Financas() {
   const budget = financeHub?.budget || { current: 0, weekly_allowance: 0, monthly_chart: [], season_baseline: {} }
   const sourceTrace = financeHub?.source_trace || {}
   const hasData = Boolean(financeHub)
+  const receitasTotal = receitas?.total ?? (receitas?.breakdown || []).reduce((sum: number, item: any) => sum + Number(item?.amount || 0), 0)
+  const despesasTotal = despesas?.total ?? (despesas?.breakdown || []).reduce((sum: number, item: any) => sum + Number(item?.amount || 0), 0)
 
   const highlightCards = useMemo(
     () => [
@@ -53,11 +55,8 @@ export function Financas() {
 
   return (
     <div className="space-y-6 pb-6">
-      <div className="flex justify-between items-center">
+      <div>
         <h2 className="font-condensed font-bold text-2xl text-white uppercase">Finanças</h2>
-        <p className="text-xs text-text-secondary uppercase tracking-[0.2em]">
-          {hasData ? `Save ${financeHub?.save_uid || '--'}` : 'Sem contexto'}
-        </p>
       </div>
 
       <div className="flex bg-[#0a140d]/80 rounded-lg p-1 border border-white/10 overflow-x-auto">
@@ -113,7 +112,7 @@ export function Financas() {
       {activeTab === 'receitas' && (
         <section className="card-base p-5">
           <h3 className="font-condensed font-bold text-lg text-white uppercase">Receitas</h3>
-          <p className="text-sm text-semantic-green mt-2">{formatMoney(receitas.total)}</p>
+          <p className="text-sm text-semantic-green mt-2">{formatMoney(receitasTotal)}</p>
           <div className="space-y-3 mt-4">
             {(receitas.breakdown || []).length === 0 ? (
               <p className="text-sm text-text-secondary">Sem entradas positivas mapeadas no período.</p>
@@ -137,7 +136,7 @@ export function Financas() {
       {activeTab === 'despesas' && (
         <section className="card-base p-5">
           <h3 className="font-condensed font-bold text-lg text-white uppercase">Despesas</h3>
-          <p className="text-sm text-semantic-red mt-2">{despesas.total == null ? '--' : formatMoney(-Math.abs(Number(despesas.total)))}</p>
+          <p className="text-sm text-semantic-red mt-2">{despesasTotal == null ? '--' : formatMoney(-Math.abs(Number(despesasTotal)))}</p>
           <div className="space-y-3 mt-4">
             {(despesas.breakdown || []).length === 0 ? (
               <p className="text-sm text-text-secondary">Sem saídas negativas mapeadas no período.</p>
@@ -213,6 +212,42 @@ export function Financas() {
               </div>
             </div>
           </div>
+          {budget?.season_flow && (
+            <div className="card-base p-5">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-condensed font-bold text-lg text-white uppercase">Fluxo da temporada</h3>
+                {typeof budget?.season_flow?.variation_pct === 'number' && (
+                  <p className={`text-xs font-bold ${budget.season_flow.variation_pct < 0 ? 'text-semantic-red' : 'text-semantic-green'}`}>
+                    Variação {budget.season_flow.variation_pct}%
+                  </p>
+                )}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-text-secondary">Receitas</p>
+                  <div className="mt-3 space-y-2">
+                    {(budget?.season_flow?.income || []).map((item: any) => (
+                      <div key={item.label} className="flex items-center justify-between gap-3">
+                        <p className="text-xs text-white">{item.label}</p>
+                        <p className="text-xs font-bold text-semantic-green">{formatMoney(item.amount)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-text-secondary">Despesas</p>
+                  <div className="mt-3 space-y-2">
+                    {(budget?.season_flow?.expense || []).map((item: any) => (
+                      <div key={item.label} className="flex items-center justify-between gap-3">
+                        <p className="text-xs text-white">{item.label}</p>
+                        <p className="text-xs font-bold text-semantic-red">{formatMoney(-Math.abs(Number(item.amount || 0)))}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           <div className="card-base p-5">
             <h3 className="font-condensed font-bold text-lg text-white uppercase">Variação por mês</h3>
             <div className="space-y-2 mt-4">

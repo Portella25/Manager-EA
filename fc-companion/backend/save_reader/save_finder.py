@@ -22,7 +22,10 @@ class SaveFinder:
             local_app_data / "EA SPORTS FC 26",
             local_app_data / "EA SPORTS FC 26" / "settings",
         ]
-        self.locked_save_name = "CmMgrC20260325175348749"
+        # Ficheiro de save explícito (sem extensão, como no disco). Override: FC_COMPANION_LOCKED_SAVE
+        self.locked_save_name = os.environ.get(
+            "FC_COMPANION_LOCKED_SAVE", "CmMgrC20260409141102584"
+        ).strip()
 
     def _candidate_files_from_root(self, root: Path) -> List[Path]:
         if not root.exists() or not root.is_dir():
@@ -42,11 +45,20 @@ class SaveFinder:
         return ("career" in name) or name.startswith("cmmgrc")
 
     def find_career_save(self) -> Optional[Path]:
-        # Trava temporária: forçar um save específico enquanto validamos a integração.
-        for root in self.search_roots:
-            locked_candidate = root / self.locked_save_name
-            if locked_candidate.exists() and locked_candidate.is_file():
-                return locked_candidate
+        # Save explícito (locked_save_name / FC_COMPANION_LOCKED_SAVE): primeiro no root, depois recursivo.
+        if self.locked_save_name:
+            for root in self.search_roots:
+                if not root.exists():
+                    continue
+                locked_candidate = root / self.locked_save_name
+                if locked_candidate.is_file():
+                    return locked_candidate
+                try:
+                    for path in root.rglob(self.locked_save_name):
+                        if path.is_file():
+                            return path
+                except OSError:
+                    continue
 
         # Estratégia híbrida: prioriza naming de carreira e depois maior .db.
         all_candidates: List[Path] = []

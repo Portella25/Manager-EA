@@ -16,6 +16,8 @@ export function SectionHeader({ title, subtitle, actionLabel, onAction }: Sectio
         <button onClick={onAction} className="text-semantic-gold text-xs font-bold hover:underline whitespace-nowrap">
           {actionLabel}
         </button>
+      ) : actionLabel ? (
+        <span className="text-text-secondary text-xs font-bold whitespace-nowrap">{actionLabel}</span>
       ) : null}
     </div>
   )

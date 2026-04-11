@@ -17,6 +17,9 @@ COMPANION.NAME_CACHE = {}
 COMPANION.NAME_RESOLVE_INTERVAL_SECONDS = 10
 COMPANION.NAME_RESOLVE_BATCH_SIZE = 12
 COMPANION.LAST_NAME_RESOLVE_TS = 0
+-- Evita repetir os.execute(mkdir) a cada export — no Windows isso pisca uma janela cmd.
+COMPANION.OUTPUT_DIR_READY = false
+COMPANION.SUBDIR_READY = {}
 
 local function log_info(msg)
     if LOGGER and LOGGER.LogInfo then
@@ -134,12 +137,20 @@ end
 
 -- Escrita atômica para evitar leitura de arquivo incompleto pelo backend.
 local function ensure_output_dir()
-    local ok = os.rename(COMPANION.OUTPUT_DIR, COMPANION.OUTPUT_DIR)
-    if ok then
+    if COMPANION.OUTPUT_DIR_READY then
         return true
     end
-    local _, _, code = os.execute('mkdir "' .. COMPANION.OUTPUT_DIR .. '" >nul 2>nul')
-    return code == 0
+    local ok = os.rename(COMPANION.OUTPUT_DIR, COMPANION.OUTPUT_DIR)
+    if ok then
+        COMPANION.OUTPUT_DIR_READY = true
+        return true
+    end
+    os.execute('mkdir "' .. COMPANION.OUTPUT_DIR .. '" >nul 2>nul')
+    if os.rename(COMPANION.OUTPUT_DIR, COMPANION.OUTPUT_DIR) then
+        COMPANION.OUTPUT_DIR_READY = true
+        return true
+    end
+    return false
 end
 
 local function write_state_lua_atomic(payload)
@@ -160,12 +171,20 @@ local function write_state_lua_atomic(payload)
 end
 
 local function ensure_dir(path)
-    local ok = os.rename(path, path)
-    if ok then
+    if COMPANION.SUBDIR_READY[path] then
         return true
     end
-    local _, _, code = os.execute('mkdir "' .. path .. '" >nul 2>nul')
-    return code == 0
+    local ok = os.rename(path, path)
+    if ok then
+        COMPANION.SUBDIR_READY[path] = true
+        return true
+    end
+    os.execute('mkdir "' .. path .. '" >nul 2>nul')
+    if os.rename(path, path) then
+        COMPANION.SUBDIR_READY[path] = true
+        return true
+    end
+    return false
 end
 
 local function write_json_atomic(path, payload)
@@ -210,7 +229,28 @@ local function write_transfer_history_json(payload)
     if LE and LE.db and LE.db.GetTable then
         transfer_table = safe_call(nil, LE.db.GetTable, LE.db, "career_presignedcontract")
     end
-    local user_team_id = to_number(((payload.club or {}).team_id), 0)
+    -- O histórico na DB usa o clube do gestor (career_users.clubteamid). GetUserTeamID() por vezes
+    -- diverge (ex.: contexto/nacional); priorizar clubteamid para bater com teamid/offerteamid.
+    local function resolve_user_club_team_id_for_transfers()
+        local tid = 0
+        if LE and LE.db and LE.db.GetTable then
+            local ut = safe_call(nil, LE.db.GetTable, LE.db, "career_users")
+            if ut then
+                local r = ut:GetFirstRecord()
+                if r and r > 0 then
+                    tid = to_number(ut:GetRecordFieldValue(r, "clubteamid"), 0)
+                end
+            end
+        end
+        if tid <= 0 then
+            tid = to_number(safe_call(0, GetUserTeamID), 0)
+        end
+        if tid <= 0 then
+            tid = to_number(((payload.club or {}).team_id), 0)
+        end
+        return tid
+    end
+    local user_team_id = resolve_user_club_team_id_for_transfers()
     local team_name_cache = {}
     local function team_name(team_id)
         local key = tostring(to_number(team_id, 0))
@@ -237,10 +277,28 @@ local function write_transfer_history_json(payload)
         return "Jogador"
     end
     local items = {}
+    local items_world = {}
     local seen = {}
-    if transfer_table and user_team_id > 0 then
+    local seen_world = {}
+    local presigned_rows_scanned = 0
+    local user_club_id_seen_in_presigned = false
+    -- Inclui transferências a título gratuito / futuras obrigações já assinadas (não só fee > 0).
+    local function row_counts_as_transfer(fee, is_loan_buy, complete_date, signed_date)
+        if fee > 0 then
+            return true
+        end
+        if is_loan_buy ~= 0 then
+            return true
+        end
+        if complete_date > 0 or signed_date > 0 then
+            return true
+        end
+        return false
+    end
+    if transfer_table then
         local rec = transfer_table:GetFirstRecord()
         while rec and rec > 0 do
+            presigned_rows_scanned = presigned_rows_scanned + 1
             local offer_team_id = to_number(transfer_table:GetRecordFieldValue(rec, "offerteamid"), 0)
             local from_team_id = to_number(transfer_table:GetRecordFieldValue(rec, "teamid"), 0)
             local player_id = to_number(transfer_table:GetRecordFieldValue(rec, "playerid"), 0)
@@ -253,37 +311,109 @@ local function write_transfer_history_json(payload)
             if fee <= 0 and future_fee > 0 then
                 fee = future_fee
             end
-            local is_buy = offer_team_id == user_team_id
-            local is_sell = from_team_id == user_team_id and offer_team_id > 0 and offer_team_id ~= user_team_id
-            if fee > 0 and (is_buy or is_sell) then
-                local key = tostring(player_id) .. "|" .. tostring(signed_date) .. "|" .. tostring(offer_team_id) .. "|" .. tostring(from_team_id) .. "|" .. tostring(fee)
-                if not seen[key] then
-                    seen[key] = true
-                    local to_team_id = is_buy and offer_team_id or offer_team_id
-                    local source_team_id = is_buy and from_team_id or user_team_id
-                    items[#items + 1] = {
-                        id = key,
+            local is_loan_move = (is_loan_buy ~= 0) or (fee <= 0 and complete_date > 0)
+            local include_transfer = row_counts_as_transfer(fee, is_loan_buy, complete_date, signed_date)
+            -- Global: grátis sem datas preenchidas no LE ainda assim são movimentos válidos (origem ≠ destino).
+            local include_world = include_transfer
+            if not include_world and player_id > 0 and from_team_id > 0 and offer_team_id > 0 and from_team_id ~= offer_team_id then
+                if fee <= 0 and offered_fee <= 0 and future_fee <= 0 and is_loan_buy == 0 then
+                    include_world = true
+                end
+            end
+            if user_team_id > 0 and (from_team_id == user_team_id or offer_team_id == user_team_id) then
+                user_club_id_seen_in_presigned = true
+            end
+            -- Histórico global ("Todos os clubes"): qualquer movimento com origem/destino válidos.
+            if
+                include_world
+                and from_team_id > 0
+                and offer_team_id > 0
+                and from_team_id ~= offer_team_id
+                and player_id > 0
+            then
+                local key_w = tostring(player_id)
+                    .. "|"
+                    .. tostring(signed_date)
+                    .. "|"
+                    .. tostring(from_team_id)
+                    .. "|"
+                    .. tostring(offer_team_id)
+                    .. "|"
+                    .. tostring(fee)
+                if not seen_world[key_w] then
+                    seen_world[key_w] = true
+                    items_world[#items_world + 1] = {
+                        id = "w:" .. key_w,
                         player_id = player_id,
                         player_name = player_name(player_id),
                         amount = fee,
                         fee = fee,
-                        type = is_buy and "buy" or "sell",
-                        direction = is_buy and "in" or "out",
+                        scope = "world",
+                        is_loan = is_loan_move,
                         is_loan_buy = is_loan_buy,
                         signed_date = signed_date,
                         completed_date = complete_date,
                         period = format_period_from_raw_date(signed_date) or format_period_from_raw_date(complete_date),
-                        from_team_id = source_team_id,
-                        from_team_name = team_name(source_team_id),
-                        to_team_id = to_team_id,
-                        to_team_name = team_name(to_team_id)
+                        from_team_id = from_team_id,
+                        from_team_name = team_name(from_team_id),
+                        to_team_id = offer_team_id,
+                        to_team_name = team_name(offer_team_id),
                     }
+                end
+            end
+            -- Meu clube: alinhado ao save_parser (Python) — compra exige clube de origem válido e != teu.
+            if user_team_id > 0 then
+                local is_buy = offer_team_id == user_team_id and from_team_id > 0 and from_team_id ~= user_team_id
+                local is_sell = from_team_id == user_team_id and offer_team_id > 0 and offer_team_id ~= user_team_id
+                local include_club = (is_buy or is_sell) and include_transfer
+                if include_club then
+                    local key = tostring(player_id)
+                        .. "|"
+                        .. tostring(signed_date)
+                        .. "|"
+                        .. tostring(offer_team_id)
+                        .. "|"
+                        .. tostring(from_team_id)
+                        .. "|"
+                        .. tostring(fee)
+                    if not seen[key] then
+                        seen[key] = true
+                        local to_team_id = offer_team_id
+                        local source_team_id = is_buy and from_team_id or user_team_id
+                        items[#items + 1] = {
+                            id = key,
+                            player_id = player_id,
+                            player_name = player_name(player_id),
+                            amount = fee,
+                            fee = fee,
+                            type = is_buy and "buy" or "sell",
+                            direction = is_buy and "in" or "out",
+                            scope = "club",
+                            is_loan = is_loan_move,
+                            is_loan_buy = is_loan_buy,
+                            signed_date = signed_date,
+                            completed_date = complete_date,
+                            period = format_period_from_raw_date(signed_date) or format_period_from_raw_date(complete_date),
+                            from_team_id = source_team_id,
+                            from_team_name = team_name(source_team_id),
+                            to_team_id = to_team_id,
+                            to_team_name = team_name(to_team_id),
+                        }
+                    end
                 end
             end
             rec = transfer_table:GetNextValidRecord()
         end
     end
     table.sort(items, function(a, b)
+        local da = to_number(a.signed_date, 0)
+        local db = to_number(b.signed_date, 0)
+        if da == db then
+            return tostring(a.id) < tostring(b.id)
+        end
+        return da < db
+    end)
+    table.sort(items_world, function(a, b)
         local da = to_number(a.signed_date, 0)
         local db = to_number(b.signed_date, 0)
         if da == db then
@@ -302,19 +432,26 @@ local function write_transfer_history_json(payload)
     end
     local transfer_payload = {
         items = items,
+        items_world = items_world,
         meta = {
-            export_version = "2.1.0",
+            export_version = "2.2.3",
             exported_at_iso = os.date("!%Y-%m-%dT%H:%M:%SZ"),
             exported_at_ts = os.time(),
             game_date = ((payload.meta or {}).game_date) or { day = nil, month = nil, year = nil },
             save_uid = save_uid,
             script_name = "companion_export.lua",
-            source = "live_editor"
+            source = "live_editor",
+            user_club_team_id = user_team_id,
+            user_club_id_seen_in_le_presigned = user_club_id_seen_in_presigned
         },
         summary = {
             count = #items,
+            world_count = #items_world,
             incoming_count = incoming_count,
-            outgoing_count = outgoing_count
+            outgoing_count = outgoing_count,
+            presigned_rows_scanned = presigned_rows_scanned,
+            presigned_table_available = transfer_table ~= nil,
+            le_presigned_has_user_club_rows = user_club_id_seen_in_presigned
         }
     }
     local output_path = save_dir .. "\\transfer_history.json"
@@ -637,6 +774,98 @@ function GetUserTeamLiveRoles()
     return safe_call({}, run)
 end
 
+local function seed_user_team_names_into_cache()
+    local team_id = to_number(safe_call(0, GetUserTeamID), 0)
+    if team_id <= 0 or not LE or not LE.db or not LE.db.GetTable then
+        return
+    end
+    local contract_table = LE.db:GetTable("career_playercontract")
+    if contract_table == nil then
+        return
+    end
+    local rec = contract_table:GetFirstRecord()
+    while rec and rec > 0 do
+        local row_team = to_number(contract_table:GetRecordFieldValue(rec, "teamid"), 0)
+        if row_team == team_id then
+            local player_id = to_number(contract_table:GetRecordFieldValue(rec, "playerid"), 0)
+            if player_id > 0 then
+                local name = safe_call("", GetPlayerName, player_id)
+                if type(name) == "string" then
+                    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+                    if name ~= "" then
+                        COMPANION.NAME_CACHE[player_id] = name
+                    end
+                end
+            end
+        end
+        rec = contract_table:GetNextValidRecord()
+    end
+end
+
+function GetUserTeamLiveDbPlayers()
+    local function run()
+        local team_id = to_number(safe_call(0, GetUserTeamID), 0)
+        if team_id <= 0 or not LE or not LE.db or not LE.db.GetTable then
+            return {}
+        end
+        local contract_table = LE.db:GetTable("career_playercontract")
+        local players_table = LE.db:GetTable("players")
+        if contract_table == nil or players_table == nil then
+            return {}
+        end
+        local wanted = {}
+        local cr = contract_table:GetFirstRecord()
+        while cr and cr > 0 do
+            local row_team = to_number(contract_table:GetRecordFieldValue(cr, "teamid"), 0)
+            if row_team == team_id then
+                local player_id = to_number(contract_table:GetRecordFieldValue(cr, "playerid"), 0)
+                if player_id > 0 then
+                    wanted[player_id] = true
+                end
+            end
+            cr = contract_table:GetNextValidRecord()
+        end
+        local out = {}
+        local need = 0
+        for _ in pairs(wanted) do
+            need = need + 1
+        end
+        if need <= 0 then
+            return {}
+        end
+        local found = 0
+        local pr = players_table:GetFirstRecord()
+        local guard = 0
+        while pr and pr > 0 do
+            guard = guard + 1
+            if guard > 200000 then
+                break
+            end
+            if need > 0 and found >= need then
+                break
+            end
+            local player_id = to_number(players_table:GetRecordFieldValue(pr, "playerid"), 0)
+            if wanted[player_id] and out[tostring(player_id)] == nil then
+                local ovr_raw = players_table:GetRecordFieldValue(pr, "overallrating")
+                local ovr = nil
+                if ovr_raw ~= nil then
+                    ovr = to_number(ovr_raw, nil)
+                end
+                -- Tabela players no LE/FC26 não expõe age/form/fitness/sharpness com estes nomes (gera erro por registo).
+                out[tostring(player_id)] = {
+                    overallrating = ovr,
+                    preferredposition1 = to_number(players_table:GetRecordFieldValue(pr, "preferredposition1"), nil),
+                    potential = to_number(players_table:GetRecordFieldValue(pr, "potential"), nil)
+                }
+                found = found + 1
+            end
+            pr = players_table:GetNextValidRecord()
+        end
+        return out
+    end
+    return safe_call({}, run)
+end
+
 local function append_event(event_id)
     COMPANION.EVENTS[#COMPANION.EVENTS + 1] = {
         event_id = to_number(event_id, 0),
@@ -814,6 +1043,16 @@ local function summarize_presigned_finance(user_team_id)
     }, run)
 end
 
+local function read_live_transfer_budget()
+    if type(GetUserTransferBudget) == "function" then
+        return to_number(safe_call(0, GetUserTransferBudget), 0)
+    end
+    if type(GetTransferBudget) == "function" then
+        return to_number(safe_call(0, GetTransferBudget), 0)
+    end
+    return 0
+end
+
 local function sample_manager_numeric_offsets(ptr, max_bytes, limit)
     local out = {}
     if ptr == nil or ptr <= 0 then
@@ -836,14 +1075,28 @@ local function sample_manager_numeric_offsets(ptr, max_bytes, limit)
     return out
 end
 
-local function discover_finance_functions()
+local function discover_finance_functions(team_id)
     local function run()
-        local names = {
-            "GetTransferBudget",
-            "GetUserTransferBudget",
-            "GetCPUTransferBudget",
-            "GetWageBudget",
+        local out = {}
+        local tid = to_number(team_id, 0)
+        local function store_value(name, value)
+            if type(value) == "number" or type(value) == "string" or type(value) == "boolean" then
+                out[name] = value
+            elseif type(value) == "table" then
+                out[name] = value
+            elseif value ~= nil then
+                out[name] = tostring(value)
+            end
+        end
+        if type(GetUserTransferBudget) == "function" then
+            store_value("GetUserTransferBudget", safe_call(nil, GetUserTransferBudget))
+        end
+        if tid > 0 and type(GetCPUTransferBudget) == "function" then
+            store_value("GetCPUTransferBudget", safe_call(nil, GetCPUTransferBudget, tid))
+        end
+        local no_arg_names = {
             "GetUserWageBudget",
+            "GetWageBudget",
             "GetCPUWageBudget",
             "GetClubWorth",
             "GetClubValue",
@@ -852,18 +1105,11 @@ local function discover_finance_functions()
             "GetFinanceOverview",
             "GetFinanceData"
         }
-        local out = {}
-        for _, name in ipairs(names) do
+        for _, name in ipairs(no_arg_names) do
             local fn = _G[name]
             if type(fn) == "function" then
                 local value = safe_call(nil, fn)
-                if type(value) == "number" or type(value) == "string" or type(value) == "boolean" then
-                    out[name] = value
-                elseif type(value) == "table" then
-                    out[name] = value
-                else
-                    out[name] = "callable"
-                end
+                store_value(name, value)
             end
         end
         return out
@@ -882,13 +1128,13 @@ local function read_finance_live_snapshot(team_id)
         local finance_manager_ptr = to_number(safe_call(0, GetManagerObjByTypeId, ENUM_FCEGameModesFCECareerModeFinanceManager), 0)
         local tcm_finance_manager_ptr = to_number(safe_call(0, GetManagerObjByTypeId, ENUM_FCEGameModesFCECareerModeTcmFinanceManager), 0)
         return {
-            transfer_budget_live = normalize_budget_value(to_number(safe_call(0, GetTransferBudget), 0)),
+            transfer_budget_live = normalize_budget_value(read_live_transfer_budget()),
             manager_pref = manager_pref,
             manager_info = manager_info,
             manager_history = manager_history,
             contract_summary = contract_summary,
             transfer_summary = transfer_summary,
-            discovered_function_values = discover_finance_functions(),
+            discovered_function_values = discover_finance_functions(team_id),
             manager_memory_samples = {
                 budget_manager = {
                     ptr = budget_manager_ptr,
@@ -915,7 +1161,7 @@ function BuildStatePartial()
         local team_id = to_number(safe_call(0, GetUserTeamID), 0)
         local manager_pref = read_manager_pref_finance()
         local finance_live = read_finance_live_snapshot(team_id)
-        local transfer_budget_live = normalize_budget_value(to_number(safe_call(0, GetTransferBudget), 0))
+        local transfer_budget_live = normalize_budget_value(read_live_transfer_budget())
         local transfer_budget = transfer_budget_live
         if transfer_budget <= 0 then
             transfer_budget = to_number(manager_pref.transferbudget, 0)
@@ -950,7 +1196,15 @@ function BuildStatePartial()
             events_raw = COMPANION.EVENTS,
             name_resolution = build_name_resolution_payload(),
             live_player_roles = GetUserTeamLiveRoles(),
-            finance_live = finance_live
+            live_db_players = GetUserTeamLiveDbPlayers(),
+            finance_live = finance_live,
+            player_stats = safe_call({}, GetUserTeamPlayerStats, team_id),
+            competition_player_stats = safe_call({
+                competitions = {},
+                competitions_club = {},
+                competitions_general = {},
+                source = "lua"
+            }, GetCompetitionPlayerStats, team_id)
         }
     end
     return safe_call({
@@ -967,8 +1221,332 @@ function BuildStatePartial()
         events_raw = {},
         name_resolution = { resolved = {}, resolved_count = 0, updated_at = os.time() },
         live_player_roles = {},
-        finance_live = {}
+        live_db_players = {},
+        finance_live = {},
+        competition_player_stats = {
+            competitions = {},
+            competitions_club = {},
+            competitions_general = {},
+            source = "lua"
+        }
     }, run)
+end
+
+--- LE.db:GetRecordFieldValue com nome inexistente gera ERROR no log do Live Editor; tentar vários nomes com pcall (FC 25/26).
+local function db_field_number(tbl, rec, candidate_names)
+    for _, n in ipairs(candidate_names) do
+        local ok, v = pcall(function() return tbl:GetRecordFieldValue(rec, n) end)
+        if ok and v ~= nil then
+            return to_number(v, 0)
+        end
+    end
+    return 0
+end
+
+--- Nome curto tipo "C1014" ou placeholder: tentar nome oficial (DOC.MD: GetCompetitionNameByObjID).
+local function looks_like_placeholder_comp_name(s)
+    if type(s) ~= "string" then return true end
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return true end
+    if s:match("^C%d+$") then return true end
+    if s:match("^c%d+$") then return true end
+    if s:match("^Competição %d+$") then return true end
+    return false
+end
+
+local function resolve_competition_display_name(cid, fallback_short)
+    cid = to_number(cid, 0)
+    if cid <= 0 then return "Competição ?" end
+    local fb = ""
+    if type(fallback_short) == "string" then
+        fb = fallback_short:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if type(GetCompetitionNameByObjID) == "function" then
+        local ok, gn = pcall(GetCompetitionNameByObjID, cid)
+        if ok and type(gn) == "string" then
+            local g = gn:gsub("^%s+", ""):gsub("%s+$", "")
+            if g ~= "" and not looks_like_placeholder_comp_name(g) then
+                return g
+            end
+            if g ~= "" and looks_like_placeholder_comp_name(fb) then
+                fb = g
+            end
+        end
+    end
+    if fb ~= "" and not looks_like_placeholder_comp_name(fb) then return fb end
+    if fb ~= "" then return fb end
+    return "Competição " .. tostring(cid)
+end
+
+local function merge_comp_name_from_stat(comp_names, cid, compname)
+    if type(compname) ~= "string" then return end
+    local cn = compname:gsub("^%s+", ""):gsub("%s+$", "")
+    if cn == "" then return end
+    if not looks_like_placeholder_comp_name(cn) then
+        comp_names[cid] = cn
+    elseif looks_like_placeholder_comp_name(comp_names[cid]) then
+        comp_names[cid] = cn
+    end
+end
+
+--- Clube: só o teu elenco. Geral: todos os jogadores que o jogo expõe em GetPlayersStats para essas competições.
+--- Nomes: GetCompetitionNameByObjID + compname das stats quando melhor que compshortname.
+function GetCompetitionPlayerStats(team_id)
+    local function run()
+        local out = {
+            competitions = {},
+            competitions_club = {},
+            competitions_general = {},
+            source = "lua",
+            source_club = "lua",
+            source_general = "lua"
+        }
+        if not LE or not LE.db then return out end
+        team_id = to_number(team_id, 0)
+        if team_id <= 0 then return out end
+
+        local squad_ids = {}
+        local ct = LE.db:GetTable("career_playercontract")
+        if ct then
+            local r = ct:GetFirstRecord()
+            while r and r > 0 do
+                if to_number(ct:GetRecordFieldValue(r, "teamid"), 0) == team_id then
+                    local pid = to_number(ct:GetRecordFieldValue(r, "playerid"), 0)
+                    if pid > 0 then squad_ids[pid] = true end
+                end
+                r = ct:GetNextValidRecord()
+            end
+        end
+
+        local comp_names = {}
+        local pt = LE.db:GetTable("career_competitionprogress")
+        if pt then
+            local r = pt:GetFirstRecord()
+            while r and r > 0 do
+                if to_number(pt:GetRecordFieldValue(r, "teamid"), 0) == team_id then
+                    local cid = to_number(pt:GetRecordFieldValue(r, "compobjid"), 0)
+                    if cid > 0 then
+                        local sn = pt:GetRecordFieldValue(r, "compshortname")
+                        if type(sn) == "string" then
+                            sn = sn:gsub("^%s+", ""):gsub("%s+$", "")
+                        else
+                            sn = ""
+                        end
+                        if sn ~= "" then
+                            comp_names[cid] = sn
+                        elseif comp_names[cid] == nil then
+                            comp_names[cid] = "Competição " .. tostring(cid)
+                        end
+                    end
+                end
+                r = pt:GetNextValidRecord()
+            end
+        end
+
+        for cid, nm in pairs(comp_names) do
+            comp_names[cid] = resolve_competition_display_name(cid, nm)
+        end
+
+        local by_club = {}
+        local by_general = {}
+        for cid, _ in pairs(comp_names) do
+            by_club[cid] = {}
+            by_general[cid] = {}
+        end
+
+        local pp_by_pid = {}
+        local function ensure_pp_map()
+            if next(pp_by_pid) ~= nil then return end
+            local pl = LE.db:GetTable("players")
+            if not pl then return end
+            local r = pl:GetFirstRecord()
+            while r and r > 0 do
+                local p = db_field_number(pl, r, { "playerid" })
+                local pp = db_field_number(pl, r, { "preferredposition1" })
+                if p > 0 then pp_by_pid[p] = pp end
+                r = pl:GetNextValidRecord()
+            end
+        end
+
+        local function position_label_for_pid(pid)
+            if type(GetPlayerPrimaryPositionName) ~= "function" then return "" end
+            ensure_pp_map()
+            local pp = pp_by_pid[pid]
+            if pp == nil then return "" end
+            local ok, lab = pcall(GetPlayerPrimaryPositionName, pp)
+            if ok and type(lab) == "string" then return lab end
+            return ""
+        end
+
+        local api_hits_club = 0
+        local api_hits_gen = 0
+        if type(GetPlayersStats) == "function" then
+            local ok_api, all_stats = pcall(GetPlayersStats)
+            if ok_api and type(all_stats) == "table" then
+                for i = 1, #all_stats do
+                    local stat = all_stats[i]
+                    if type(stat) == "table" then
+                        local cid = to_number(stat.compobjid, 0)
+                        local pid = to_number(stat.playerid, 0)
+                        local app = to_number(stat.app, 0)
+                        if cid > 0 and pid > 0 and comp_names[cid] ~= nil and app > 0 then
+                            merge_comp_name_from_stat(comp_names, cid, stat.compname)
+                            local goals = to_number(stat.goals, 0)
+                            local assists = to_number(stat.assists, 0)
+                            local y = to_number(stat.yellow, 0) + to_number(stat.two_yellow, 0)
+                            local red = to_number(stat.red, 0)
+                            local cs = to_number(stat.clean_sheets, 0)
+                            local avg_raw = to_number(stat.avg, 0)
+                            local rating_10 = 0
+                            if app > 1 then
+                                rating_10 = (avg_raw / app) / 10
+                            elseif app == 1 then
+                                rating_10 = avg_raw / 10
+                            end
+                            local tid = to_number(stat.teamid, 0)
+                            local row_club = {
+                                playerid = pid,
+                                goals = goals,
+                                assists = assists,
+                                appearances = app,
+                                clean_sheets = cs,
+                                yellow_cards = y,
+                                red_cards = red,
+                                avg_rating_raw = rating_10
+                            }
+                            local row_gen = {
+                                playerid = pid,
+                                teamid = tid,
+                                team_name = safe_call("", GetTeamName, tid),
+                                player_name = safe_call("", GetPlayerName, pid),
+                                position = position_label_for_pid(pid),
+                                goals = goals,
+                                assists = assists,
+                                appearances = app,
+                                clean_sheets = cs,
+                                yellow_cards = y,
+                                red_cards = red,
+                                avg_rating_raw = rating_10
+                            }
+                            by_general[cid][#by_general[cid] + 1] = row_gen
+                            api_hits_gen = api_hits_gen + 1
+                            if squad_ids[pid] then
+                                by_club[cid][#by_club[cid] + 1] = row_club
+                                api_hits_club = api_hits_club + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if api_hits_club == 0 then
+            out.source_club = "lua_career_playerstats_table"
+            local pst = LE.db:GetTable("career_playerstats")
+            if pst then
+                local r = pst:GetFirstRecord()
+                while r and r > 0 do
+                    local cid = db_field_number(pst, r, { "compobjid", "compobjId", "competitionid" })
+                    local pid = db_field_number(pst, r, { "playerid" })
+                    if cid > 0 and pid > 0 and squad_ids[pid] and comp_names[cid] then
+                        local goals = db_field_number(pst, r, { "goals", "leaguegoals", "totalgoals" })
+                        local assists = db_field_number(pst, r, { "assists", "leagueassists", "totalassists" })
+                        local apps = db_field_number(pst, r, { "appearances", "gamesplayed", "leaguegames", "numgames" })
+                        local cs = db_field_number(pst, r, { "cleansheets", "leaguecleansheets" })
+                        local y = db_field_number(pst, r, { "yellows", "yellowcards", "yellowcard" })
+                        local red = db_field_number(pst, r, { "reds", "redcards", "redcard" })
+                        local rating = db_field_number(pst, r, { "avgmatchrating", "averagestat", "rating", "lastmatchrating", "avgrating" })
+                        by_club[cid][#by_club[cid] + 1] = {
+                            playerid = pid,
+                            goals = goals,
+                            assists = assists,
+                            appearances = apps,
+                            clean_sheets = cs,
+                            yellow_cards = y,
+                            red_cards = red,
+                            avg_rating_raw = rating
+                        }
+                    end
+                    r = pst:GetNextValidRecord()
+                end
+            end
+        else
+            out.source_club = "lua_get_players_stats"
+        end
+
+        if api_hits_gen > 0 then
+            out.source_general = "lua_get_players_stats"
+        else
+            out.source_general = "lua_no_general_data"
+        end
+
+        for cid, nm in pairs(comp_names) do
+            comp_names[cid] = resolve_competition_display_name(cid, nm)
+        end
+
+        local list_club = {}
+        local list_gen = {}
+        for cid, name in pairs(comp_names) do
+            list_club[#list_club + 1] = {
+                competition_id = cid,
+                competition_name = name,
+                players = by_club[cid] or {}
+            }
+            list_gen[#list_gen + 1] = {
+                competition_id = cid,
+                competition_name = name,
+                players = by_general[cid] or {}
+            }
+        end
+        table.sort(list_club, function(a, b) return tostring(a.competition_name) < tostring(b.competition_name) end)
+        table.sort(list_gen, function(a, b) return tostring(a.competition_name) < tostring(b.competition_name) end)
+        out.competitions = list_club
+        out.competitions_club = list_club
+        out.competitions_general = list_gen
+        out.source = out.source_club
+        return out
+    end
+    return safe_call({
+        competitions = {},
+        competitions_club = {},
+        competitions_general = {},
+        source = "lua"
+    }, run)
+end
+
+function GetUserTeamPlayerStats(team_id)
+    local function run()
+        if not LE or not LE.db then return {} end
+        local tpl = LE.db:GetTable("teamplayerlinks")
+        if tpl == nil then return {} end
+        team_id = to_number(team_id, 0)
+        local out = {}
+        local rec = tpl:GetFirstRecord()
+        while rec and rec > 0 do
+            local row_team = db_field_number(tpl, rec, { "teamid" })
+            if row_team == team_id then
+                local pid = db_field_number(tpl, rec, { "playerid" })
+                if pid > 0 then
+                    -- FC 26 teamplayerlinks (schema real): leaguegoals, leagueappearances, yellows, reds, form…
+                    -- NÃO usar leagueassists/leaguecleansheets aqui — o Live Editor regista ERROR no log mesmo com pcall.
+                    -- Assistências / jogos sem sofrer gols vêm de career_playerstats (GetCompetitionPlayerStats / aba Estatísticas).
+                    out[#out + 1] = {
+                        playerid     = pid,
+                        goals        = db_field_number(tpl, rec, { "leaguegoals", "goals" }),
+                        assists      = 0,
+                        appearances  = db_field_number(tpl, rec, { "leagueappearances", "appearances", "gamesplayed", "numgames" }),
+                        clean_sheets = 0,
+                        yellow_cards = db_field_number(tpl, rec, { "yellows", "yellowcards" }),
+                        red_cards    = db_field_number(tpl, rec, { "reds", "redcards" }),
+                        form         = db_field_number(tpl, rec, { "form" }),
+                    }
+                end
+            end
+            rec = tpl:GetNextValidRecord()
+        end
+        return out
+    end
+    return safe_call({}, run)
 end
 
 local function export_once()
@@ -981,6 +1559,7 @@ local function export_once()
             log_error("FC Companion: não foi possível criar/acessar diretório de saída.")
             return
         end
+        safe_call(nil, seed_user_team_names_into_cache)
         safe_call(nil, resolve_missing_names_batch)
         local payload = BuildStatePartial()
         local wrote_state = write_state_lua_atomic(payload)

@@ -1,5 +1,31 @@
 import { useGameStore } from '../store/useGameStore'
 
+const TIMELINE_PHASE_PT: Record<string, string> = {
+  season_arc: 'Arco da temporada',
+  season_arc_start: 'Início do arco sazonal',
+  season_arc_payoff: 'Desfecho do arco',
+  crisis_step: 'Momento da crise',
+  crisis_start: 'Crise iniciada',
+  calendar: 'Calendário',
+  pre_match: 'Pré-jogo',
+  post_match: 'Pós-jogo',
+  fan_reaction: 'Torcida',
+  board_note: 'Diretoria',
+  market_watch: 'Mercado',
+  achievement: 'Conquista',
+  legacy: 'Legado',
+}
+
+function timelinePhaseLabel(entry: { phase?: string; phase_label?: string }) {
+  if (entry.phase_label?.trim()) return entry.phase_label
+  const key = (entry.phase || '').toLowerCase()
+  if (TIMELINE_PHASE_PT[key]) return TIMELINE_PHASE_PT[key]
+  if (!entry.phase) return 'Momento'
+  return entry.phase
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
 function scoreTone(value?: number | null, inverse = false) {
   const safeValue = Number(value ?? 0)
   if (inverse) {
@@ -22,7 +48,6 @@ export function Carreira() {
   const careerState = data?.career_management_state || {}
   const lockerRoom = careerState.locker_room || {}
   const tactical = careerState.tactical || {}
-  const medical = careerState.medical || {}
   const coachProfile = data?.coach_profile || {}
   const seasonContext = data?.season_context || {}
   const leagueTable = seasonContext?.league_table || {}
@@ -96,7 +121,7 @@ export function Carreira() {
 
         <div className="grid grid-cols-2 gap-3 mt-4">
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-            <p className="text-[10px] uppercase tracking-[0.2em] text-text-secondary">Arc da temporada</p>
+            <p className="text-[10px] uppercase tracking-[0.2em] text-text-secondary">Arco da temporada</p>
             <p className="text-sm font-bold text-white mt-2">{seasonArc?.theme || tactical?.identity_label || 'Sem tema dominante'}</p>
             <p className="text-xs text-text-secondary mt-1">{seasonArc ? `${seasonArc.current_milestone}/${seasonArc.max_milestones} marcos` : 'Sem arco persistido'}</p>
           </div>
@@ -126,7 +151,7 @@ export function Carreira() {
             </div>
             <div className="rounded-xl border border-white/10 bg-white/5 p-3">
               <p className="text-[10px] uppercase tracking-[0.2em] text-text-secondary">Estilo do técnico</p>
-              <p className="text-lg font-bold text-white mt-2">{tactical.coach_style || '--'}</p>
+              <p className="text-lg font-bold text-white mt-2 capitalize">{tactical.coach_style || '--'}</p>
             </div>
           </div>
 
@@ -139,7 +164,11 @@ export function Carreira() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-bold text-white">{player.player_name}</p>
-                      <p className="text-[11px] uppercase tracking-wide text-text-secondary mt-1">{player.role_label} · {player.status_label}</p>
+                      <p className="text-[11px] text-text-secondary mt-1">
+                    <span className="font-medium text-white/90">{player.role_label}</span>
+                    <span className="mx-1 text-text-secondary/80">·</span>
+                    <span>{player.status_label}</span>
+                  </p>
                     </div>
                     <p className={`text-sm font-bold ${scoreTone(100 - Number(player.frustration || 0), true)}`}>{player.frustration ?? 0}</p>
                   </div>
@@ -157,7 +186,7 @@ export function Carreira() {
             ) : (
               timeline.slice(0, 4).map((entry: any) => (
                 <div key={entry.id} className="rounded-xl border border-white/10 bg-black/20 p-3">
-                  <p className="text-[10px] uppercase tracking-[0.2em] text-semantic-gold">{entry.phase || 'momento'}</p>
+                  <p className="text-[10px] font-medium tracking-wide text-semantic-gold">{timelinePhaseLabel(entry)}</p>
                   <p className="text-sm font-bold text-white mt-2">{entry.title}</p>
                   <p className="text-xs text-text-secondary mt-1 leading-relaxed">{entry.content}</p>
                 </div>

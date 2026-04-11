@@ -39,7 +39,7 @@ function statTone(value?: number | null) {
 export function Plantel() {
   const { squad, loading } = useGameStore()
   const [viewMode, setViewMode] = useState<'lista' | 'campo'>('campo')
-  const players = squad || []
+  const players = useMemo(() => squad ?? [], [squad])
 
   const sortedPlayers = useMemo(
     () => [...players].sort((a: any, b: any) => Number(b?.overall || 0) - Number(a?.overall || 0)),

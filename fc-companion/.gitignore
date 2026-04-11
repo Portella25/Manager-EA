@@ -1,6 +1,11 @@
+# Segredos — não commitar ficheiros com chaves reais
 .env
-.env.*
-*.env
+.env.local
+.env.development
+.env.production
+.env.test
+# Template sem valores sensíveis (pode versionar)
+!.env.example
 
 *.key
 *.pem
@@ -12,6 +17,14 @@
 fc-companion/backend/*.db
 backend/*.db
 *.db
+*.db-journal
 
 node_modules/
 dist/
+
+# PyInstaller — regenerar com launcher/BUILD_EXE.md + FCCompanion.spec
+launcher/build/
+launcher/dist/
+
+# Imagens enviadas pelo utilizador (troféus/clubes) — geradas em runtime
+backend/uploads/

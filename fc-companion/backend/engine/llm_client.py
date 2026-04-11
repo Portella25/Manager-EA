@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 try:
     from dotenv import load_dotenv, find_dotenv
@@ -16,6 +16,7 @@ class GeminiClient:
     _last_call_ts = 0.0
     _cooldown_until_ts = 0.0
     _calls_in_process = 0
+    _last_press_ts = 0.0
 
     def __init__(self):
         self.model = None
@@ -127,3 +128,112 @@ DIRETRIZES:
                 self.last_error_type = "other"
             self.last_response_origin = "fallback_error"
             return f"Os ânimos se exaltaram após o último evento ({event_type}), e a tensão paira no ar."
+
+    def try_generate_press_coach_reply(self, bundle: Dict[str, Any]) -> Optional[str]:
+        """
+        Resposta curta de treinador em coletiva (PT-BR, 1ª pessoa). Não compete com o rate limit
+        das narrativas épicas; usa intervalo próprio (GEMINI_PRESS_MIN_INTERVAL_SECONDS).
+        """
+        if not self.model and not self.client:
+            return None
+        now = time.time()
+        if now < GeminiClient._cooldown_until_ts:
+            return None
+        min_gap = float(os.getenv("GEMINI_PRESS_MIN_INTERVAL_SECONDS", "1.25"))
+        if now - GeminiClient._last_press_ts < min_gap:
+            return None
+        coach = str(bundle.get("coach_name") or "Treinador")
+        club = str(bundle.get("club") or "Clube")
+        style = str(bundle.get("style") or "analytical")
+        audience = str(bundle.get("audience") or "staff")
+        question = str(bundle.get("question") or "").strip()
+        topic = str(bundle.get("topic_type") or "season").strip().lower()
+        theme_label = str(bundle.get("topic_theme_label") or "CONTEXTO DA TEMPORADA")
+        opp = str(bundle.get("next_opponent") or "o adversário")
+        comp = str(bundle.get("next_competition") or "competição")
+        last_sc = str(bundle.get("last_score") or "").strip()
+        last_l = str(bundle.get("last_result_letter") or "").strip()
+        rank = bundle.get("table_rank")
+        pts = bundle.get("table_points")
+        tcomp = str(bundle.get("table_competition") or "")
+        inj = bundle.get("injured_count")
+        cong = bundle.get("congestion_index")
+        fatigue = bundle.get("fatigue_index")
+
+        facts_lines = [f"Clube: {club}", f"Competição em foco: {comp}"]
+        include_opp_score = topic in ("match", "form")
+        if include_opp_score and opp:
+            facts_lines.append(f"Próximo adversário: {opp}")
+        if include_opp_score and last_sc:
+            facts_lines.append(f"Último placar (seu time): {last_sc} (resultado: {last_l or '—'})")
+        if topic in ("season", "market", "board") and rank is not None and pts is not None:
+            facts_lines.append(f"Tabela ({tcomp or comp}): posição {rank}ª com {pts} pontos")
+        if topic == "medical":
+            if inj is not None:
+                facts_lines.append(f"Desfalques reportados: {inj}")
+            if cong is not None:
+                facts_lines.append(f"Índice de congestão de calendário: {cong}")
+            if fatigue is not None:
+                facts_lines.append(f"Desgaste médio do elenco (referência): {fatigue}")
+        elif topic == "market":
+            facts_lines.append("Contexto: perguntas sobre mercado/janela/rumores — não invente negociações.")
+        facts_block = "\n".join(facts_lines)
+
+        tema_regras = (
+            f"TEMA OBRIGATÓRIO DA RESPOSTA: {theme_label}.\n"
+            "Responda diretamente a essa pauta. Não desvie para preparação detalhada do próximo adversário nem cite placar de jogo passado "
+            "se o tema for MERCADO, DIRETORIA, VESTIÁRIO ou PARTE FÍSICA, salvo se a pergunta pedir explicitamente.\n"
+            "Se o tema for MERCADO/JANELA, fale de rumor vs trabalho interno, foco no elenco atual e critério com a diretoria — não 'fechar plano tático contra X'.\n"
+            "Seja específico ao que foi perguntado; evite repetir a mesma frase genérica de coletiva."
+        )
+
+        style_hints = {
+            "aggressive": "firme, exigente, responsabilidade e resultado; sem insultos",
+            "calm": "sereno, método, controle emocional",
+            "motivational": "confiante, orgulho do grupo, trabalho e foco; cite torcida quando couber",
+            "analytical": "processo, clareza, decisões objetivas, sem promessa vazia",
+        }
+        style_hint = style_hints.get(style.lower(), style_hints["analytical"])
+
+        prompt = f"""Você é {coach}, treinador do {club}, em coletiva de imprensa no Brasil.
+Responda em português do Brasil, na primeira pessoa (eu/nós), em 2 a 4 frases curtas e naturais.
+Tom pedido: {style} — {style_hint}.
+Audiência implícita da pergunta: {audience} (diretoria / elenco / comissão).
+
+{tema_regras}
+
+PERGUNTA DO JORNALISTA:
+{question}
+
+FATOS (use só o que for listado; não invente lesionados, placares ou negociações):
+{facts_block}
+
+Regras: sem meta-comentário de IA; sem aspas; não repita a pergunta inteira.
+Inclua pelo menos uma destas palavras quando fizer sentido: trabalho, foco ou confiante (ajuda na análise automática do tom)."""
+
+        try:
+            GeminiClient._last_press_ts = time.time()
+            if self.client and self.sdk_mode == "google_genai":
+                response = self.client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                )
+                text = (response.text or "").strip() if response.text else ""
+            else:
+                response = self.model.generate_content(prompt)
+                text = (response.text or "").strip() if response.text else ""
+            self.last_response_origin = "press_llm_success"
+            if len(text) < 28:
+                return None
+            return text[:1400]
+        except Exception as e:
+            raw = str(e)
+            lowered = raw.lower()
+            self.last_error_message = raw
+            if "429" in lowered or "resource_exhausted" in lowered or "quota" in lowered:
+                self.last_error_type = "quota"
+                GeminiClient._cooldown_until_ts = time.time() + self.cooldown_seconds
+            else:
+                self.last_error_type = "other"
+            self.last_response_origin = "press_llm_error"
+            return None

@@ -36,11 +36,11 @@ export function Layout() {
   }, [customBackground])
 
   return (
-    <div className="flex flex-col min-h-screen bg-transparent max-w-md mx-auto relative shadow-2xl overflow-hidden">
+    <div className="flex flex-col min-h-screen bg-transparent w-full max-w-md md:max-w-3xl lg:max-w-5xl xl:max-w-6xl mx-auto relative shadow-2xl overflow-hidden">
       <Header />
       
       {/* Main scrollable area */}
-      <main className="flex-1 overflow-y-auto pb-20 pt-4 px-4 scroll-smooth">
+      <main className="flex-1 overflow-y-auto pb-20 pt-4 px-4 md:px-6 lg:px-8 scroll-smooth">
         <Outlet />
       </main>
 

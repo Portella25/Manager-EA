@@ -8,7 +8,7 @@ export function ArticleReader({ article, onClose }: ArticleReaderProps) {
     <div className="w-full max-w-md mx-auto bg-[#09110b] border border-white/10 rounded-3xl p-5">
       <div className="flex justify-between items-start gap-4 mb-5">
         <div>
-          <p className="text-[10px] uppercase tracking-[0.2em] text-semantic-gold font-bold mb-2">{article?.slot || 'notícia'}</p>
+          <p className="text-[10px] uppercase tracking-[0.2em] text-semantic-gold font-bold mb-2">{article?.slot_label || article?.slot || 'Notícia'}</p>
           <h3 className="text-2xl font-condensed font-bold text-white uppercase leading-tight">{article?.headline}</h3>
         </div>
         {onClose ? (
@@ -17,6 +17,10 @@ export function ArticleReader({ article, onClose }: ArticleReaderProps) {
           </button>
         ) : null}
       </div>
+
+      {article?.subheadline && article.subheadline !== article?.lead ? (
+        <p className="text-sm text-white/75 leading-relaxed mb-3 border-l-2 border-semantic-gold/40 pl-3">{article.subheadline}</p>
+      ) : null}
 
       <p className="text-base text-white/90 leading-relaxed mb-4">{article?.lead}</p>
 

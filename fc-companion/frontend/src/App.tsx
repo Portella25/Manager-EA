@@ -11,6 +11,8 @@ import { Social } from './pages/Social'
 import { NewsArticle } from './pages/NewsArticle'
 import { Conference } from './pages/Conference'
 import { Financas } from './pages/Financas'
+import { StatusFisico } from './pages/StatusFisico'
+import { Estatisticas } from './pages/Estatisticas'
 
 function App() {
   return (
@@ -26,6 +28,8 @@ function App() {
           <Route path="mercado" element={<Mercado />} />
           <Route path="social" element={<Social />} />
           <Route path="financas" element={<Financas />} />
+          <Route path="status-fisico" element={<StatusFisico />} />
+          <Route path="estatisticas" element={<Estatisticas />} />
           <Route path="social/:articleId" element={<NewsArticle />} />
           <Route path="coletiva" element={<Conference />} />
         </Route>

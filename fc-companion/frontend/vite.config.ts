@@ -1,9 +1,13 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiProxyTarget = (env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8001').replace(/\/$/, '')
+
+  return {
   plugins: [
     react(),
     VitePWA({
@@ -34,10 +38,11 @@ export default defineConfig({
   server: {
     host: '0.0.0.0', // Expose to local network
     proxy: {
-      '^/(api|state|feed|events|companion|career|profile|torcida|press-conference|board|crisis|season-arc|legacy|hall-of-fame|achievements|meta-achievements|market|timeline|dashboard|news|conference|finance)/.*': {
-        target: 'http://localhost:8001',
+      '^/(api|state|feed|events|companion|career|profile|torcida|press-conference|internal-comms|board|crisis|season-arc|legacy|hall-of-fame|achievements|meta-achievements|market|timeline|dashboard|news|conference|finance|uploads|stats)/.*': {
+        target: apiProxyTarget,
         changeOrigin: true,
       }
     }
+  }
   }
 })

@@ -270,16 +270,16 @@ class CareerDynamicsEngine:
         age = player.get("age")
         try:
             if age is not None and int(age) <= 21:
-                return "promessa"
+                return "Promessa"
         except (TypeError, ValueError):
             pass
         ov = player.get("overall")
         try:
             if ov is not None and int(ov) >= 85:
-                return "intocavel"
+                return "Intocável"
         except (TypeError, ValueError):
             pass
-        return "rotacao"
+        return "Rodízio"
 
     def _apply_morale_drop(
         self,
