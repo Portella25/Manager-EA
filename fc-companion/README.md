@@ -9,7 +9,7 @@
 
 ## O que é?
 
-O ProManager transforma os dados do teu Modo Carreira numa **experiência paralela ao jogo**: um painel web que acompanha cada resultado, lesão, transferência e marco da tua temporada — com narrativa gerada por IA, jornal esportivo, coletivas de imprensa, diretoria reagindo às tuas decisões e muito mais.
+O FC Companion transforma os dados do teu Modo Carreira numa **experiência paralela ao jogo**: um painel web que acompanha cada resultado, lesão, transferência e marco da tua temporada — com narrativa gerada por IA, jornal esportivo, coletivas de imprensa, diretoria reagindo às tuas decisões e muito mais.
 
 Funciona **100% local** no teu PC. Nenhum dado sai da tua máquina sem a tua permissão.
 
@@ -75,8 +75,8 @@ EA FC 26 (save em disco)
 ### 1. Clone o repositório
 
 ```bash
-git clone https://github.com/seu-usuario/promanager.git
-cd promanager
+git clone https://github.com/seu-usuario/fc-companion.git
+cd fc-companion
 ```
 
 ### 2. Backend
@@ -102,9 +102,9 @@ npm run build
 
 1. Abre o EA FC 26 e carrega a tua carreira.
 2. No Live Editor, abre o **Lua Engine**.
-3. Cola o conteúdo de `extractor/promanager_export.lua` e executa.
+3. Cola o conteúdo de `extractor/fc_companion_export.lua` e executa.
 
-O script vai criar a pasta `%USERPROFILE%\Desktop\promanager\` com o ficheiro `state_lua.json`.
+O script vai criar a pasta `%USERPROFILE%\Desktop\fc-companion\` com o ficheiro `state_lua.json`.
 
 ### Passo 2 — API
 
@@ -138,24 +138,24 @@ Ou acessa diretamente via `http://localhost:8000` se já tiveres feito o build.
 ## Estrutura do projeto
 
 ```
-promanager/
+fc-companion/
 ├── extractor/
-│   └── promanager_export.lua     # Script Lua para o Live Editor
+│   └── fc_companion_export.lua     # Script Lua para o Live Editor
 ├── backend/
-│   ├── main.py                   # API FastAPI
-│   ├── watcher.py                # Monitoramento de mudanças
-│   ├── merger.py                 # Unificação das fontes de dados
-│   ├── events.py                 # Detecção de eventos (diff de estado)
-│   ├── database.py               # Persistência SQLite
-│   ├── *_engine.py               # Motores de domínio (narrativa, mercado, etc.)
-│   ├── engine/                   # Análise, dispatcher e cliente LLM
-│   ├── save_reader/              # Leitura do save em disco
-│   └── front_read_models.py      # Agregadores de dados para o frontend
+│   ├── main.py                     # API FastAPI
+│   ├── watcher.py                  # Monitoramento de mudanças
+│   ├── merger.py                   # Unificação das fontes de dados
+│   ├── events.py                   # Detecção de eventos (diff de estado)
+│   ├── database.py                 # Persistência SQLite
+│   ├── *_engine.py                 # Motores de domínio (narrativa, mercado, etc.)
+│   ├── engine/                     # Análise, dispatcher e cliente LLM
+│   ├── save_reader/                # Leitura do save em disco
+│   └── front_read_models.py        # Agregadores de dados para o frontend
 ├── frontend/
-│   └── src/                      # React + TypeScript + Tailwind
+│   └── src/                        # React + TypeScript + Tailwind
 ├── launcher/
-│   ├── run_promanager.py         # Script de arranque
-│   └── ProManager.spec           # Spec PyInstaller (gerar .exe)
+│   ├── run_fc_companion.py         # Script de arranque
+│   └── FC Companion.spec           # Spec PyInstaller (gerar .exe)
 └── README.md
 ```
 
@@ -165,10 +165,10 @@ promanager/
 
 | Ficheiro | Descrição |
 |----------|-----------|
-| `Desktop/promanager/state_lua.json` | Dados exportados pelo Lua |
-| `Desktop/promanager/save_data.json` | Dados lidos do save em disco |
-| `Desktop/promanager/state.json` | Estado unificado (fonte da API) |
-| `backend/promanager.db` | Histórico, eventos, perfis (SQLite) |
+| `Desktop/fc-companion/state_lua.json` | Dados exportados pelo Lua |
+| `Desktop/fc-companion/save_data.json` | Dados lidos do save em disco |
+| `Desktop/fc-companion/state.json` | Estado unificado (fonte da API) |
+| `backend/fc_companion.db` | Histórico, eventos, perfis (SQLite) |
 
 ---
 
@@ -183,7 +183,7 @@ OPENAI_BASE_URL=
 OPENAI_MODEL=
 
 # Provider de narrativa: "template" | "openai" | "gemini" | "ollama"
-PROMANAGER_AI_PROVIDER=template
+FC_COMPANION_AI_PROVIDER=template
 ```
 
 ---
@@ -193,7 +193,7 @@ PROMANAGER_AI_PROVIDER=template
 ```bash
 cd launcher
 pip install pyinstaller
-pyinstaller ProManager.spec
+pyinstaller "FC Companion.spec"
 ```
 
 O executável será gerado em `launcher/dist/`. Consulta `BUILD_EXE.md` para detalhes.
