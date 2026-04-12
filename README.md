@@ -1,6 +1,6 @@
 # FC Companion
 
-![FC Companion Prévia](Documentos/CapturaPWA.png)
+![FC Companion Prévia]([Documentos/CapturaPWA.png](https://github.com/Portella25/Manager-EA/issues/1)
 
 
 > Companion de mesa para o **Modo Carreira do EA FC 26 (PC)**.  
