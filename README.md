@@ -131,7 +131,7 @@ cd frontend
 npm run dev
 ```
 
-Ou acessa diretamente via `http://localhost:8000` se já tiveres feito o build.
+Ou acessa diretamente via `http://localhost:5173` se já tiveres feito o build.
 
 ---
 
