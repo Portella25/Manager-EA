@@ -1,4 +1,4 @@
-# ProManager
+# FC Companion
 
 > Companion de mesa para o **Modo Carreira do EA FC 26 (PC)**.  
 > Lê o teu save e o estado em memória via Live Editor, detecta eventos em tempo real e alimenta uma **API REST + PWA** com narrativa, jornal esportivo, diretoria, mercado, conquistas e muito mais.
