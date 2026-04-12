@@ -3,7 +3,7 @@
 ![FC Companion Prévia]([Documentos/CapturaPWA.png](https://github.com/Portella25/Manager-EA/issues/1)
 
 
-> Companion de mesa para o **Modo Carreira do EA FC 26 (PC)**.  
+> Companion de PC ou App PWA para o **Modo Carreira do EA FC 26 (PC)**.  
 > Lê o teu save e o estado em memória via Live Editor, detecta eventos em tempo real e alimenta uma **API REST + PWA** com narrativa, jornal esportivo, diretoria, mercado, conquistas e muito mais.
 
 > ⚠️ Projeto independente. Não é afiliado à Electronic Arts nem ao EA FC.
