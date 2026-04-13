@@ -2,8 +2,7 @@
 
 ![FC Companion Prévia]([Documentos/CapturaPWA.png](https://github.com/Portella25/Manager-EA/issues/1)
 
-
-> Companion de PC ou App PWA para o **Modo Carreira do EA FC 26 (PC)**.  
+> Companion de mesa para o **Modo Carreira do EA FC 26 (PC)**.  
 > Lê o teu save e o estado em memória via Live Editor, detecta eventos em tempo real e alimenta uma **API REST + PWA** com narrativa, jornal esportivo, diretoria, mercado, conquistas e muito mais.
 
 > ⚠️ Projeto independente. Não é afiliado à Electronic Arts nem ao EA FC.
@@ -33,22 +32,50 @@ Funciona **100% local** no teu PC. Nenhum dado sai da tua máquina sem a tua per
 
 ## Como funciona
 
-```
-EA FC 26 (save em disco)
+```text
+EA FC 26 (save + runtime)
+        │
+        ├── Live Editor / Lua ───────────────► Desktop/fc_companion/state_lua.json
+        │                                      └─ name resolution, live roles, finance_live
+        │
+        └── Save de carreira (.db) ─► save_reader/ ─► Desktop/fc_companion/save_data.json
+                                         │              └─ transfer_history / season stats / squad
+                                         └─ save_watcher.py + node_fbparser/
+
+state_lua.json + save_data.json
         │
         ▼
-  save_data.json ──┐
-                   ├──► merger.py ──► state.json ──► watcher.py ──► FastAPI ──► React PWA
-  state_lua.json ──┘
-  (Live Editor)
+watcher.py
+        ├── StateMerger ─────────────► Desktop/fc_companion/state.json
+        ├── EventDetector ───────────► eventos brutos
+        ├── EventDispatcher ─────────► eventos híbridos
+        └── ExternalIngestion ───────► schema / reference_data / season_stats / transfer_history
+
+state.json + eventos + artefatos
+        │
+        ▼
+FastAPI (backend/main.py)
+        ├── database.py / SQLite (fc_companion.db)
+        ├── *_engine.py (narrativa, reputação, mercado, crise, legado, conquistas...)
+        ├── front_read_models.py (payloads agregados para a SPA)
+        └── uploads/ (troféus e escudos)
+
+FastAPI
+        │
+        ▼
+React PWA (frontend/src)
+        ├── App.tsx + Layout
+        ├── pages/
+        ├── components/
+        ├── store/
+        └── lib/api.ts
 ```
 
-1. O **script Lua** (Live Editor) exporta dados de memória do jogo a cada 5 segundos.
-2. O **leitor de save** (Python) complementa com dados do ficheiro `.db` do jogo.
-3. O **merger** unifica tudo num `state.json` estável.
-4. O **watcher** detecta mudanças, gera eventos e envia para a API.
-5. A **API (FastAPI)** processa eventos com motores de narrativa, reputação, mercado, etc.
-6. O **frontend (React PWA)** exibe tudo num painel acessível também no telemóvel.
+1. O **script Lua** (Live Editor) exporta dados de memória do jogo para `state_lua.json`.
+2. O **save reader** lê o save em disco e complementa com `save_data.json`, incluindo histórico de transferências e estatísticas.
+3. O **watcher** combina as fontes, detecta mudanças, gera eventos e envia o resultado para a API.
+4. A **API (FastAPI)** orquestra os motores de domínio, persiste em SQLite e expõe os payloads consumidos pela SPA.
+5. O **frontend (React PWA)** lê a API e apresenta o painel web, inclusive nos ecrãs premium.
 
 ---
 
@@ -105,9 +132,9 @@ npm run build
 
 1. Abre o EA FC 26 e carrega a tua carreira.
 2. No Live Editor, abre o **Lua Engine**.
-3. Cola o conteúdo de `extractor/fc_companion_export.lua` e executa.
+3. Cola o conteúdo de `extractor/companion_export.lua` e executa.
 
-O script vai criar a pasta `%USERPROFILE%\Desktop\fc-companion\` com o ficheiro `state_lua.json`.
+O script vai criar a pasta `%USERPROFILE%\Desktop\fc_companion\` com o ficheiro `state_lua.json`.
 
 ### Passo 2 — API
 
@@ -134,7 +161,7 @@ cd frontend
 npm run dev
 ```
 
-Ou acessa diretamente via `http://localhost:5173` se já tiveres feito o build.
+Ou acessa diretamente via `http://localhost:8000` se já tiveres feito o build.
 
 ---
 
@@ -143,22 +170,92 @@ Ou acessa diretamente via `http://localhost:5173` se já tiveres feito o build.
 ```
 fc-companion/
 ├── extractor/
-│   └── fc_companion_export.lua     # Script Lua para o Live Editor
+│   ├── companion_export.lua       # Script Lua principal para o Live Editor
+│   └── explore_cm_feed_managers.lua
 ├── backend/
-│   ├── main.py                     # API FastAPI
-│   ├── watcher.py                  # Monitoramento de mudanças
-│   ├── merger.py                   # Unificação das fontes de dados
-│   ├── events.py                   # Detecção de eventos (diff de estado)
-│   ├── database.py                 # Persistência SQLite
-│   ├── *_engine.py                 # Motores de domínio (narrativa, mercado, etc.)
-│   ├── engine/                     # Análise, dispatcher e cliente LLM
-│   ├── save_reader/                # Leitura do save em disco
-│   └── front_read_models.py        # Agregadores de dados para o frontend
+│   ├── main.py                    # API FastAPI e orquestração dos motores
+│   ├── watcher.py                 # Monitoramento e despacho de eventos
+│   ├── merger.py                  # Unificação das fontes de dados
+│   ├── database.py                # Persistência SQLite
+│   ├── events.py                  # Detecção de eventos no estado mesclado
+│   ├── models.py                  # Schemas de entrada da API
+│   ├── front_read_models.py       # Payloads agregados para o frontend
+│   ├── external_ingestion.py      # Ingestão de artefatos auxiliares
+│   ├── competition_stats.py       # Estatísticas de competições
+│   ├── *_engine.py                # Motores de domínio (narrativa, mercado, legado...)
+│   ├── internal_comms_*.py        # Fluxos de comunicação interna
+│   ├── press_*.py                 # Press conference e fallout narrativo
+│   ├── legacy_*.py                # Hub de legado e perfil histórico
+│   ├── save_reader/
+│   │   ├── save_finder.py
+│   │   ├── save_parser.py
+│   │   ├── save_watcher.py
+│   │   ├── transfer_history_from_save.py
+│   │   └── node_fbparser/
+│   │       ├── parse_fbchunks.js
+│   │       ├── package.json
+│   │       └── package-lock.json
+│   └── uploads/
+│       ├── clubs/
+│       └── trophies/
 ├── frontend/
-│   └── src/                        # React + TypeScript + Tailwind
+│   ├── public/favicon.svg
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── main.tsx
+│   │   ├── index.css
+│   │   ├── components/
+│   │   │   ├── Layout.tsx
+│   │   │   ├── Header.tsx
+│   │   │   ├── BottomNav.tsx
+│   │   │   ├── Empty.tsx
+│   │   │   ├── NotificationBell.tsx
+│   │   │   └── premium/
+│   │   │       ├── ArticleReader.tsx
+│   │   │       ├── NewsStoryCard.tsx
+│   │   │       ├── SectionHeader.tsx
+│   │   │       └── SignalRadarCard.tsx
+│   │   ├── hooks/useTheme.ts
+│   │   ├── lib/api.ts
+│   │   ├── lib/utils.ts
+│   │   ├── pages/
+│   │   │   ├── Feed.tsx
+│   │   │   ├── Home.tsx
+│   │   │   ├── Plantel.tsx
+│   │   │   ├── Carreira.tsx
+│   │   │   ├── Legado.tsx
+│   │   │   ├── Conquistas.tsx
+│   │   │   ├── Configuracoes.tsx
+│   │   │   ├── Mercado.tsx
+│   │   │   ├── Social.tsx
+│   │   │   ├── NewsArticle.tsx
+│   │   │   ├── Conference.tsx
+│   │   │   ├── Financas.tsx
+│   │   │   ├── StatusFisico.tsx
+│   │   │   └── Estatisticas.tsx
+│   │   └── store/
+│   │       ├── index.ts
+│   │       ├── useGameStore.ts
+│   │       ├── useFinanceStore.ts
+│   │       ├── useCareerHubStore.ts
+│   │       └── useNotificationsStore.ts
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tailwind.config.js
+│   └── dist/                     # Build gerado pelo Vite/FastAPI
 ├── launcher/
-│   ├── run_fc_companion.py         # Script de arranque
-│   └── FC Companion.spec           # Spec PyInstaller (gerar .exe)
+│   ├── run_companion.py          # Script de arranque
+│   ├── run_companion.bat
+│   ├── FCCompanion.spec          # Spec PyInstaller
+│   └── BUILD_EXE.md
+├── docs/
+│   ├── AI_GEMINI.md
+│   ├── CAREER_PREMIUM_FRONT_BLUEPRINT.md
+│   ├── CM_FEED_ARCHITECTURE.md
+│   ├── ENV.md
+│   ├── HALL_OF_FAME_SYNC.md
+│   ├── LIVE_EDITOR_DATA_CONTRACT.md
+│   └── RUN_LOCAL.md
 └── README.md
 ```
 
@@ -168,10 +265,13 @@ fc-companion/
 
 | Ficheiro | Descrição |
 |----------|-----------|
-| `Desktop/fc-companion/state_lua.json` | Dados exportados pelo Lua |
-| `Desktop/fc-companion/save_data.json` | Dados lidos do save em disco |
-| `Desktop/fc-companion/state.json` | Estado unificado (fonte da API) |
-| `backend/fc_companion.db` | Histórico, eventos, perfis (SQLite) |
+| `Desktop/fc_companion/state_lua.json` | Dados exportados pelo Lua |
+| `Desktop/fc_companion/save_data.json` | Dados lidos do save em disco |
+| `Desktop/fc_companion/state.json` | Estado unificado (fonte da API) |
+| `Desktop/fc_companion/save_probe/` | Dumps auxiliares do parser do save |
+| `Desktop/fc_companion/<save_uid>/transfer_history.json` | Histórico de transferências ingerido pelo backend |
+| `backend/fc_companion.db` | Histórico, eventos, perfis e narrativas (SQLite) |
+| `backend/uploads/` | Imagens enviadas para troféus e clubes |
 
 ---
 
@@ -186,7 +286,7 @@ OPENAI_BASE_URL=
 OPENAI_MODEL=
 
 # Provider de narrativa: "template" | "openai" | "gemini" | "ollama"
-FC_COMPANION_AI_PROVIDER=template
+PROMANAGER_AI_PROVIDER=template
 ```
 
 ---
@@ -196,7 +296,7 @@ FC_COMPANION_AI_PROVIDER=template
 ```bash
 cd launcher
 pip install pyinstaller
-pyinstaller "FC Companion.spec"
+pyinstaller FCCompanion.spec
 ```
 
 O executável será gerado em `launcher/dist/`. Consulta `BUILD_EXE.md` para detalhes.
