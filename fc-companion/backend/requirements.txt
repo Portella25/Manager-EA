@@ -6,3 +6,4 @@ pydantic
 requests
 python-dotenv
 google-generativeai
+python-multipart
